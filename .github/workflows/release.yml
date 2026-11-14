@@ -1,0 +1,205 @@
+name: Release packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag, for example v0.1.1'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+
+jobs:
+  linux-package:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config git \
+            libasound2-dev libdbus-1-dev libfontconfig1-dev \
+            libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --locked --workspace
+
+      - name: Create pacman package
+        run: |
+          package=$(packaging/make-linux-package.sh '${{ matrix.arch }}')
+          test "$(uname -m)" = '${{ matrix.arch }}'
+          test -s "$package"
+          test -s "$package.sha256"
+          mkdir -p release
+          mv "$package" "$package.sha256" release/
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sodam-linux-${{ matrix.arch }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  macos-app:
+    name: macOS arm64 .app
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Metal shader 编译需要完整版 Xcode，macOS runner 镜像自带。
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --locked --workspace
+
+      - name: Create macOS app bundle
+        run: |
+          package=$(packaging/macos/make-macos-app.sh)
+          test -s "$package"
+          test -s "$package.sha256"
+          mkdir -p release
+          mv "$package" "$package.sha256" release/
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sodam-macos-aarch64
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-package:
+    name: Windows x64 installer
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      # Windows runner 自带 VS Build Tools。
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --locked --workspace
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+        shell: pwsh
+
+      - name: Create Windows installer
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' |
+            Select-Object -First 1).Matches.Groups[1].Value
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$version" `
+            packaging/windows/sodam.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $setup = "release/sodam-$version-windows-x64-setup.exe"
+          if (-not (Test-Path $setup)) { throw "installer not found: $setup" }
+          $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
+          "$hash  $(Split-Path $setup -Leaf)" | Out-File -FilePath "$setup.sha256" -Encoding ascii
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sodam-windows-x64
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  github-release:
+    name: Publish GitHub Release
+    needs: [linux-package, macos-app, windows-package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # 附注 tag 的消息就是本次发布的更新说明（changelog 写在 `git tag -a` 里）
+      - name: Checkout for tag message
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Fetch tag object
+        run: git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}" --no-tags
+
+      - name: Read changelog from tag message
+        id: tagnotes
+        run: |
+          notes=$(git tag -l --format='%(contents)' "${RELEASE_TAG}")
+          if [ -z "$notes" ]; then
+            notes="（本次发布未附更新说明：请用附注 tag 携带 changelog）"
+          fi
+          {
+            echo 'notes<<RELEASE_NOTES_EOF'
+            printf '%s\n' "$notes"
+            echo 'RELEASE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Generate release checksums
+        run: |
+          cd release
+          rm -f SHA256SUMS
+          sha256sum *.pkg.tar.zst *.zip *.exe > SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: SodaM ${{ env.RELEASE_TAG }}
+          body: |
+            ${{ steps.tagnotes.outputs.notes }}
+
+            ---
+
+            Packages built by GitHub Actions.
+
+            Linux (pacman):
+            - `x86_64` pacman package
+            - `aarch64` pacman package
+
+            macOS (Apple Silicon, unsigned / ad-hoc signed):
+            - `aarch64` `.app` zip，首次打开见 README「macOS 下载安装」
+
+            Windows (x64 installer, per-user):
+            - `windows-x64` 安装包，双击安装，见 README「Windows 下载安装」
+
+            - `SHA256SUMS`
+          files: |
+            release/*.pkg.tar.zst
+            release/*.zip
+            release/*.exe
+            release/SHA256SUMS
+          draft: false
+          prerelease: false

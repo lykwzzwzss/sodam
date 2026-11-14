@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="112 112 1024 1024">
+  <title>SodaM</title>
+  <defs>
+    <radialGradient id="tile" cx="63%" cy="54%" r="73%">
+      <stop stop-color="#050609"/>
+      <stop offset=".58" stop-color="#0a0b10"/>
+      <stop offset=".86" stop-color="#14151d"/>
+      <stop offset="1" stop-color="#20212b"/>
+    </radialGradient>
+    <linearGradient id="bottom" gradientUnits="userSpaceOnUse" x1="378" y1="921" x2="803" y2="716">
+      <stop stop-color="#9ef4ff"/>
+      <stop offset=".32" stop-color="#89eef3"/>
+      <stop offset=".68" stop-color="#a3f3e1"/>
+      <stop offset="1" stop-color="#e1ffd1"/>
+    </linearGradient>
+    <linearGradient id="fold" gradientUnits="userSpaceOnUse" x1="667" y1="561" x2="625" y2="792">
+      <stop stop-color="#47735d"/>
+      <stop offset=".33" stop-color="#7cb993"/>
+      <stop offset=".72" stop-color="#b1f0b6"/>
+      <stop offset="1" stop-color="#dbffd2"/>
+    </linearGradient>
+    <linearGradient id="top" gradientUnits="userSpaceOnUse" x1="449" y1="669" x2="827" y2="331">
+      <stop stop-color="#e4ffda"/>
+      <stop offset=".55" stop-color="#94f9a8"/>
+      <stop offset="1" stop-color="#b1ff59"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#tile)" stroke="#181921" stroke-width="2" d="M392 130H860C1015 130 1122 236 1122 392V865C1122 1020 1016 1124 861 1124H391C236 1124 130 1020 130 865V391C130 237 237 130 392 130Z"/>
+  <g transform="translate(-2 -10)">
+    <path fill="url(#bottom)" d="M369 890V841C369 808 391 780 423 767L737 646C812 618 871 666 871 732C871 784 835 829 786 848L487 963C430 986 369 952 369 890Z"/>
+    <path fill="url(#fold)" d="M477 456L789 611C843 638 871 685 871 732C871 766 858 796 834 819C811 839 784 837 753 824L482 700C422 676 386 632 386 576C386 527 420 482 477 456Z"/>
+    <path fill="url(#top)" d="M386 576C386 520 426 463 486 437L770 317C827 294 884 331 884 389V443C884 476 863 504 831 517L489 662C438 684 386 629 386 576Z"/>
+  </g>
+</svg>

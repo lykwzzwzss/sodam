@@ -1,0 +1,14 @@
+/target*
+/.cargo
+*.log
+.DS_Store
+
+# 打包产物（packaging/ 下的脚本在仓库根目录生成）
+/SodaM.app
+/release/
+/*.zip
+/*.sha256
+/*.pkg.tar.zst
+
+# 本地测量/截图临时目录
+.tmp/

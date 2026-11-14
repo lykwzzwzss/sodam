@@ -1,0 +1,27 @@
+[package]
+name = "sodam-core"
+description = "SodaM的领域层：本地音乐库、配置、队列与播放（不含 UI，不联网）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
+# 配置文件的原子落盘（同目录写临时文件再替换）。
+tempfile = "3"
+# 0.20 的 symphonia 解码器遇到「MP4 容器 + FLAC」会在初始化 seek 时报错并 panic
+# （rodio 内部 unreachable!()）；0.22 已修好。
+# wav / vorbis 是本地音乐需要的：用户自己的 .wav 与 .ogg 也得能播。
+rodio = { version = "0.22", default-features = false, features = ["playback", "flac", "mp3", "mp4", "wav", "vorbis"] }
+# 本地音乐的标签与时长：mp3(ID3v2) / flac(Vorbis Comment) / m4a(MP4 ilst) / ogg 统一读。
+# 这些容器格式自己解析要处理编码、版本、边界，没必要重写一遍。
+lofty = "0.24"
+# 解码内嵌封面并算主题色。只开常见封面格式，避免把整套图像编解码器拖进来。
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
+# ITU-R BS.1770 / EBU R128 响度与 4x 过采样 True Peak 测量。
+ebur128 = "0.1"

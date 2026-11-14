@@ -1,0 +1,5 @@
+*
+!.gitignore
+!PKGBUILD
+!sodam.desktop
+!mkrepo.sh

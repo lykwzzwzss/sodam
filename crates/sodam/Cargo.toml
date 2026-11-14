@@ -1,0 +1,57 @@
+[package]
+name = "sodam"
+description = "SodaM —— 基于 GPUI 的纯本地音乐播放器（不联网）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sodam"
+path = "src/main.rs"
+
+[dependencies]
+sodam-core = { path = "../sodam-core" }
+anyhow.workspace = true
+dirs.workspace = true
+sys-locale.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+unicode-segmentation = "1.13.3"
+
+# StatusNotifier 托盘是 Linux 桌面协议，macOS 上没有 D-Bus session bus。
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = "0.2"
+# 系统媒体控制：MPRIS（playerctl / 桌面挂件 / 合成器绑的媒体键）。
+mpris-server = "0.10"
+tokio = { version = "1", features = ["sync"] }
+futures-lite = "2"
+
+# macOS / Windows 共用 tray-icon：macOS 走 NSStatusItem，Windows 走 shell 通知区域。
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+tray-icon = "0.25"
+# 系统媒体控制：macOS 的 Now Playing 中心 / Windows 的 SMTC 传输控件。
+souvlaki = "0.8"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# SMTC 要挂在窗口上，需要从 gpui 的 Window 上取原生 HWND。
+raw-window-handle = "0.6"
+# Windows：任务栏 UIA 探测、DWM 扩展边框、DPI 与窗口子类化。
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# 本地音乐库：系统文件夹选择框（IFileOpenDialog）。只在后台线程里调，不阻塞渲染。
+rfd = "0.15"
+
+# 把应用图标嵌入 sodam.exe（快捷方式 / 资源管理器显示）。
+[build-dependencies]
+winresource = "0.1"
