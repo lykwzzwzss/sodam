@@ -95,7 +95,7 @@ pub fn render(
                 .relative()
                 .with_animation(
                     gpui::ElementId::Name(format!("page-fade-{page_key}").into()),
-                    motion::standard(motion::duration::PAGE),
+                    motion::container(motion::duration::PAGE),
                     |this, delta| this.opacity(delta).top(px(8.0 * (1.0 - delta))),
                 )
                 .child(content.child(body)),

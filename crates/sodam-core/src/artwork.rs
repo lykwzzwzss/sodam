@@ -413,7 +413,7 @@ fn base_ramp(lab: [f32; 3]) -> [[u8; 3]; 9] {
     let mut ramp = [[0u8; 3]; 9];
     for (index, lightness) in LIGHTNESS.iter().enumerate() {
         let edge = (1.0 - (2.0 * lightness - 1.0).abs()).sqrt();
-        let scale = normalize * (0.55 + 0.45 * edge);
+        let scale = normalize * (0.45 + 0.55 * edge);
         ramp[index] = oklab_to_rgb([*lightness, lab[1] * scale, lab[2] * scale]);
     }
     ramp

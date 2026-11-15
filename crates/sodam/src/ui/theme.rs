@@ -143,13 +143,17 @@ pub fn page_background() -> Background {
     )
 }
 
-/// 进度条填充：汽水音乐深色页用 base-3。
+/// 进度条填充：汽水音乐深色页用 base-3；若 base-3 过暗（例如黑底+局部彩色主体封面
+/// 导致 base 阶梯退化为中性深灰），则回退到活力强调色 `accent()` 保证可读性。
 pub fn progress_fill() -> Rgba {
     if colorful() {
-        base(2)
-    } else {
-        accent()
+        let fill = base(2);
+        let luminance = 0.2126 * fill.r + 0.7152 * fill.g + 0.0722 * fill.b;
+        if luminance >= 0.28 {
+            return fill;
+        }
     }
+    accent()
 }
 
 /// 抬升面：搜索框、卡片、播放栏按钮。
@@ -244,8 +248,8 @@ pub fn backdrop_glow() -> Background {
     let glow = accent_seed().unwrap_or_else(|| hex(BRAND_GREEN));
     linear_gradient(
         135.0,
-        linear_color_stop(with_alpha(glow, 0.16), 0.0),
-        linear_color_stop(with_alpha(glow, 0.0), 0.68),
+        linear_color_stop(with_alpha(glow, 0.20), 0.0),
+        linear_color_stop(with_alpha(glow, 0.0), 0.72),
     )
 }
 
@@ -256,8 +260,8 @@ pub fn backdrop_ambient_glow() -> Background {
         .unwrap_or_else(|| base(7));
     linear_gradient(
         315.0,
-        linear_color_stop(with_alpha(glow, 0.36), 0.0),
-        linear_color_stop(with_alpha(glow, 0.0), 0.62),
+        linear_color_stop(with_alpha(glow, 0.40), 0.0),
+        linear_color_stop(with_alpha(glow, 0.0), 0.66),
     )
 }
 

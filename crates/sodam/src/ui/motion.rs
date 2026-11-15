@@ -41,7 +41,7 @@ pub mod duration {
     /// 搜索模式进入/退出：头部布局调整，但输入过滤仍然即时。
     pub const SEARCH: Duration = Duration::from_millis(350);
     /// 歌单切换：标题与歌数（和头图共用同一个切换起点）。
-    pub const PLAYLIST_CONTENT: Duration = Duration::from_millis(400);
+    pub const PLAYLIST_CONTENT: Duration = Duration::from_millis(320);
     /// 同一张封面从 96px 升级到 320px：原位轻过渡，不重播整段切换。
     pub const COVER_UPGRADE: Duration = Duration::from_millis(120);
     /// 侧栏行悬停离开（进入仍用 `HOVER`）。
@@ -56,19 +56,19 @@ pub mod duration {
     pub const SIDEBAR_MARKER_NEAR: Duration = Duration::from_millis(380);
     pub const SIDEBAR_MARKER_FAR: Duration = Duration::from_millis(280);
     /// 本地页 ⇄ 正在播放页。
-    pub const PAGE: Duration = Duration::from_millis(600);
+    pub const PAGE: Duration = Duration::from_millis(460);
     /// 队列抽屉：展开稍慢、收起略快。
     pub const DRAWER_OPEN: Duration = Duration::from_millis(420);
     pub const DRAWER_CLOSE: Duration = Duration::from_millis(320);
-    /// 封面更换：大封面 550ms，播放栏小封面 420ms。
-    pub const COVER: Duration = Duration::from_millis(550);
-    pub const COVER_SMALL: Duration = Duration::from_millis(420);
+    /// 封面更换：大封面 420ms，播放栏小封面 340ms。
+    pub const COVER: Duration = Duration::from_millis(420);
+    pub const COVER_SMALL: Duration = Duration::from_millis(340);
     /// 缩略图从占位变成封面。
     pub const THUMB: Duration = Duration::from_millis(160);
-    /// 歌词换行：当前行放大/变亮（比旧版慢，配合整体滚动的柔和节奏）。
-    pub const LYRIC: Duration = Duration::from_millis(420);
+    /// 歌词换行：当前行放大/变亮（跟拍感更利落）。
+    pub const LYRIC: Duration = Duration::from_millis(320);
     /// 上一行歌词退场（比进入略快，视线已经移到新行）。
-    pub const LYRIC_OUT: Duration = Duration::from_millis(380);
+    pub const LYRIC_OUT: Duration = Duration::from_millis(290);
     /// 译文亮度跟随换行（字号不变，只变颜色）。
     pub const LYRIC_TRANSLATION: Duration = Duration::from_millis(360);
     /// 译文显示/隐藏：渐隐渐显 + 4px 位移，歌词位置保持稳定。
@@ -97,9 +97,20 @@ pub fn standard(duration: Duration) -> Animation {
     Animation::new(duration).with_easing(gpui::ease_out_quint())
 }
 
+/// 容器缓动：三次减速，适合页面切换、抽屉、大封面等大面积位移/缩放，避免前冲过猛。
+pub fn container(duration: Duration) -> Animation {
+    Animation::new(duration).with_easing(smooth_decel)
+}
+
 /// 柔和缓动：两端都慢，用于选中高亮、主题色这类氛围变化。
 pub fn soft(duration: Duration) -> Animation {
     Animation::new(duration).with_easing(ease_in_out_cubic)
+}
+
+/// 三次 ease-out，比 ease_out_quint 更柔和均匀。
+pub fn smooth_decel(t: f32) -> f32 {
+    let inv = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - inv * inv * inv
 }
 
 /// 三次 ease-in-out（比 gpui 自带的二次版本更圆滑）。
