@@ -123,7 +123,7 @@ fn play_icon(root: &Root, playing: bool) -> AnyElement {
         svg()
             .path(icons::path(name))
             .size(px(theme::ICON_LG))
-            .text_color(gpui::white())
+            .text_color(theme::control_emphasis_text())
             .into_any_element()
     };
     let current = if playing { "pause" } else { "play" };
@@ -350,6 +350,7 @@ fn top_progress(
         .absolute()
         .top(px(-4.0))
         .left(gpui::relative(shown))
+        .ml(px(-10.0 * shown))
         .size(px(10.0))
         .rounded_full()
         .bg(theme::text());
@@ -558,7 +559,7 @@ pub fn render(root: &mut Root, cx: &mut Context<Root>) -> impl IntoElement {
         .flex_none()
         .px(px(theme::space::XL))
         // 半透明磨砂底：整页色板变化会透到这一层。
-        .bg(theme::chrome())
+        .bg(theme::player_chrome())
         .child(top_progress(root, progress, loading, progress_fade, cx))
         // 左：封面 + 标题/歌手
         .child(
@@ -685,44 +686,44 @@ pub fn render(root: &mut Root, cx: &mut Context<Root>) -> impl IntoElement {
                             },
                         ))
                         .child(
-                            div().relative().child(
-                                div()
-                                    .id("play-toggle")
-                                    .relative()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .w(px(theme::size::PLAY_BTN_W))
-                                    .h(px(theme::size::PLAY_BTN_H))
-                                    .rounded(px(theme::radius::PILL))
-                                    .bg(gpui::rgba(0xFFFFFF0D))
-                                    .cursor_pointer()
-                                    .child(motion::hover_layer(
-                                        "play-toggle",
-                                        play_fade,
-                                        theme::radius::PILL,
-                                        gpui::rgba(0xFFFFFF1A),
-                                    ))
-                                    .active(|style| style.layer_scale(0.97))
-                                    .on_hover(Root::hover_listener(cx, "play-toggle"))
-                                    .on_click(cx.listener(
-                                        |root, _event: &ClickEvent, _window, cx| {
-                                            root.toggle_play(cx);
-                                            cx.notify();
-                                        },
-                                    ))
-                                    .child(if loading {
-                                        crate::ui::spinner::spinner(theme::ICON_LG, theme::text())
-                                            .into_any_element()
-                                    } else {
-                                        // 播放/暂停图标 140ms 交叉淡化 + 轻微缩放。
-                                        div()
-                                            .relative()
-                                            .size(px(theme::ICON_LG))
-                                            .child(play_icon(root, playing))
-                                            .into_any_element()
-                                    }),
-                            ),
+                            div()
+                                .id("play-toggle")
+                                .relative()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .w(px(theme::size::PLAY_BTN_W))
+                                .h(px(theme::size::PLAY_BTN_H))
+                                .rounded(px(theme::radius::PILL))
+                                .border_1()
+                                .border_color(theme::play_button_border())
+                                .bg(theme::play_button())
+                                .cursor_pointer()
+                                .child(motion::hover_layer(
+                                    "play-toggle",
+                                    play_fade,
+                                    theme::radius::PILL,
+                                    theme::play_button_hover(),
+                                ))
+                                .active(|style| style.layer_scale(0.97))
+                                .on_hover(Root::hover_listener(cx, "play-toggle"))
+                                .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
+                                    root.toggle_play(cx);
+                                    cx.notify();
+                                }))
+                                .child(if loading {
+                                    crate::ui::spinner::spinner(
+                                        theme::ICON_LG,
+                                        theme::control_emphasis_text(),
+                                    )
+                                    .into_any_element()
+                                } else {
+                                    div()
+                                        .relative()
+                                        .size(px(theme::ICON_LG))
+                                        .child(play_icon(root, playing))
+                                        .into_any_element()
+                                }),
                         )
                         .child(transport_button(
                             "next",

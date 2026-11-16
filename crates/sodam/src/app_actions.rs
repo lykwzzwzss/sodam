@@ -193,6 +193,8 @@ impl Root {
         let target = snapshot.duration_seconds * fraction.clamp(0.0, 1.0) as f64;
         self.engine.seek(target);
         self.progress_anchor_at = std::time::Instant::now();
+        self.lyrics_last_seek = Some(self.progress_anchor_at);
+        self.lyrics_scroll_stagger = None;
         self.progress_anchor_seconds = target;
         self.progress_anchor_track = snapshot.track_id.clone();
         let snapshot = self.engine.snapshot();
@@ -209,6 +211,8 @@ impl Root {
         self.engine
             .seek(target.min(snapshot.duration_seconds.max(0.0)));
         self.progress_anchor_at = std::time::Instant::now();
+        self.lyrics_last_seek = Some(self.progress_anchor_at);
+        self.lyrics_scroll_stagger = None;
         self.progress_anchor_seconds = target.min(snapshot.duration_seconds.max(0.0));
         self.progress_anchor_track = snapshot.track_id.clone();
         let snapshot = self.engine.snapshot();
@@ -475,9 +479,7 @@ impl Root {
                     None => root.engine.load(track.clone(), path.clone()),
                 };
                 root.reset_progress_anchor();
-                // 先退回歌单封面，等这首的封面在后台准备好再淡入。
-                // 旧封面继续显示，直到新封面的异步结果回来（序号过期即丢弃）。
-                root.artwork_seq = root.artwork_seq.wrapping_add(1);
+                // 新封面就绪前继续显示旧封面（序号过期即丢弃）。
                 root.request_lyrics(&track, path.clone(), cx);
                 root.request_track_artwork(&track, path, cx);
                 root.pending_engine_load = Some(sequence);

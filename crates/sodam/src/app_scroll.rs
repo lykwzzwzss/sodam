@@ -12,7 +12,7 @@ use gpui::prelude::*;
 use gpui::{
     div, px, Div, ScrollHandle, ScrollWheelEvent, Stateful, UniformListScrollHandle, Window,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::app::Root;
 use crate::ui::smooth_scroll::{self, ScrollSlot};
@@ -91,6 +91,7 @@ impl Root {
         if key == "lyrics-scroll" {
             self.lyrics_hold_until = Some(Instant::now() + std::time::Duration::from_secs(3));
             self.lyrics_scroll_line = None;
+            self.lyrics_scroll_stagger = None;
         }
         let line_height = window.line_height();
         let delta = f32::from(event.delta.pixel_delta(line_height).y);
@@ -105,8 +106,9 @@ impl Root {
         });
         slot.anim.wheel(applied, delta, max);
         smooth_scroll::apply(&slot.handle, slot.anim.current());
-        if slot.anim.is_running() {
-            self.ensure_scroll_loop(window, cx);
+        if key == "settings-scroll" {
+            self.settings_scroll_lock_until = None;
+            self.sync_settings_section();
         }
         cx.notify();
     }
@@ -149,11 +151,40 @@ impl Root {
             .get("lyrics-scroll")
             .is_some_and(|slot| slot.anim.is_running());
         let line_changed = self.lyrics_scroll_line != Some(index);
-        let needs_nudge = (smooth_scroll::read(&handle) - target).abs() > 0.5;
+        let start = smooth_scroll::read(&handle);
+        let needs_nudge = (start - target).abs() > 0.5;
         if !line_changed && (running || !needs_nudge) {
             return;
         }
         self.lyrics_scroll_line = Some(index);
+        let now = Instant::now();
+        let adjacent = self
+            .lyrics_prev_active
+            .is_some_and(|prev| (1..=4).contains(&index.saturating_sub(prev)));
+        let normal_interval = self.lyrics.as_ref().is_some_and(|lyrics| {
+            let at = lyrics.lines.get(index).and_then(|line| line.at_ms);
+            let previous = index
+                .checked_sub(1)
+                .and_then(|index| lyrics.lines.get(index))
+                .and_then(|line| line.at_ms);
+            let next = lyrics.lines.get(index + 1).and_then(|line| line.at_ms);
+            [previous.zip(at), at.zip(next)]
+                .into_iter()
+                .flatten()
+                .all(|(start, end)| end.saturating_sub(start) >= 420)
+        });
+        self.lyrics_scroll_stagger = (line_changed
+            && needs_nudge
+            && self.settings.lyrics_staggered_scroll
+            && adjacent
+            && normal_interval
+            && self
+                .lyrics_switch_at
+                .is_some_and(|at| now.duration_since(at) < Duration::from_millis(120))
+            && !self
+                .lyrics_last_seek
+                .is_some_and(|at| now.duration_since(at) < Duration::from_millis(400)))
+        .then_some((now, start));
         let slot = self
             .scroll_anims
             .entry("lyrics-scroll")
@@ -161,11 +192,80 @@ impl Root {
                 anim: Default::default(),
                 handle: handle.clone(),
             });
-        slot.anim
-            .animate_to_soft(smooth_scroll::read(&handle), target, max);
+        slot.anim.animate_to_soft(start, target, max);
         smooth_scroll::apply(&slot.handle, slot.anim.current());
-        self.ensure_scroll_loop(window, cx);
+        window.request_animation_frame();
         cx.notify();
+    }
+
+    /// 设置页二级导航点击：平滑滚动到对应分组卡片。
+    pub(crate) fn scroll_settings_to(
+        &mut self,
+        section_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_active_section = section_index;
+        self.settings_scroll_lock_until = Some(Instant::now() + Duration::from_millis(650));
+        let handle = self.settings_scroll.clone();
+        let max = smooth_scroll::max_of(&handle);
+        if max > 0.0 {
+            if let (Some(first), Some(target_bounds)) = (
+                handle.bounds_for_item(0),
+                handle.bounds_for_item(section_index),
+            ) {
+                let target =
+                    (f32::from(target_bounds.origin.y) - f32::from(first.origin.y)).clamp(0.0, max);
+                let slot = self
+                    .scroll_anims
+                    .entry("settings-scroll")
+                    .or_insert_with(|| ScrollSlot {
+                        anim: Default::default(),
+                        handle: handle.clone(),
+                    });
+                slot.anim
+                    .animate_to_soft(smooth_scroll::read(&handle), target, max);
+                smooth_scroll::apply(&slot.handle, slot.anim.current());
+                window.request_animation_frame();
+            }
+        }
+        cx.notify();
+    }
+
+    /// 手动滚动设置页时，自动把顶部二级导航高亮同步到当前可见的首个分组。
+    pub(crate) fn sync_settings_section(&mut self) {
+        if !self.settings_open || self.player_view_open {
+            return;
+        }
+        if self
+            .settings_scroll_lock_until
+            .is_some_and(|until| Instant::now() < until)
+        {
+            return;
+        }
+        let handle = &self.settings_scroll;
+        let max = smooth_scroll::max_of(handle);
+        if max <= 0.0 {
+            return;
+        }
+        let scrolled = smooth_scroll::read(handle);
+        if scrolled >= max - 4.0 {
+            self.settings_active_section = 4;
+            return;
+        }
+        let viewport_top = f32::from(handle.bounds().origin.y);
+        let threshold = (f32::from(handle.bounds().size.height) * 0.22).clamp(96.0, 180.0);
+        let mut active = 0usize;
+        for idx in 0..5usize {
+            let Some(bounds) = handle.bounds_for_item(idx) else {
+                continue;
+            };
+            let visible_top = f32::from(bounds.origin.y) - scrolled - viewport_top;
+            if visible_top <= threshold {
+                active = idx;
+            }
+        }
+        self.settings_active_section = active;
     }
 
     /// 外部跳转后让动画状态跟上（切歌单、滚到某首等）。
@@ -178,34 +278,25 @@ impl Root {
         self.lyrics_scroll_line = None;
     }
 
-    /// 启动逐帧缓动循环（已在跑就不重复挂）。
-    pub(crate) fn ensure_scroll_loop(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
-        if self.scroll_anim_loop {
-            return;
-        }
-        self.scroll_anim_loop = true;
-        cx.on_next_frame(window, |root, window, cx| {
-            root.step_scroll_anims(window, cx)
-        });
-    }
-
-    /// 推进一帧缓动。
-    fn step_scroll_anims(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+    /// 和窗口渲染共用同一个帧循环，避免重建窗口后遗留滚动回调状态。
+    pub(crate) fn step_scroll_anims(&mut self, window: &mut Window) {
         let now = Instant::now();
         let mut running = false;
-        for slot in self.scroll_anims.values_mut() {
+        let mut settings_moved = false;
+        for (key, slot) in self.scroll_anims.iter_mut() {
             if let Some(scrolled) = slot.anim.step(now) {
                 smooth_scroll::apply(&slot.handle, scrolled);
-                running = true;
+                running |= slot.anim.is_running();
+                if *key == "settings-scroll" {
+                    settings_moved = true;
+                }
             }
         }
+        if settings_moved {
+            self.sync_settings_section();
+        }
         if running {
-            cx.notify();
-            cx.on_next_frame(window, |root, window, cx| {
-                root.step_scroll_anims(window, cx)
-            });
-        } else {
-            self.scroll_anim_loop = false;
+            window.request_animation_frame();
         }
     }
 }

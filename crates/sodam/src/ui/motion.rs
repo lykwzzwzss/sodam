@@ -76,6 +76,7 @@ pub mod duration {
     /// 整块歌词首次加载/切歌淡入。
     pub const LYRIC_LOAD: Duration = Duration::from_millis(450);
     /// 任务栏播放条第二行（歌词/歌手）换行的交叉淡化。
+    #[cfg(target_os = "windows")]
     pub const TASKBAR_LYRIC: Duration = Duration::from_millis(280);
     /// 状态行。
     pub const STATUS_IN: Duration = Duration::from_millis(160);

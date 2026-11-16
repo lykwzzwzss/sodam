@@ -25,13 +25,46 @@ const LYRIC_PANEL_W: f32 = 560.0;
 /// 主歌词字号：普通行 / 当前行。
 ///
 /// 换行断点永远按当前行字号（较大的那个）测量，放大时不会重新断行。
-const ENGLISH_BASE: f32 = 20.0;
-const ENGLISH_ACTIVE: f32 = 26.0;
-/// 译文比原文小一个层级，只做理解辅助。
-const TRANSLATION_SIZE: f32 = 14.0;
-/// 行内垂直节奏：英文行按当前行字号预留，切行时行高不变。
-const ENGLISH_LINE_H: f32 = 34.0;
-const TRANSLATION_LINE_H: f32 = 19.0;
+/// 歌词字体与行高规格：由设置的「字体大小」和「字体粗细」派生。
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct LyricTypography {
+    size: u16,
+    weight: u16,
+}
+
+impl LyricTypography {
+    fn from_settings(settings: &sodam_core::config::Settings) -> Self {
+        Self {
+            size: settings.lyrics_font_size,
+            weight: settings.lyrics_font_weight,
+        }
+    }
+
+    fn base_size(self) -> f32 {
+        self.active_size() * 0.77
+    }
+
+    fn active_size(self) -> f32 {
+        f32::from(self.size)
+    }
+
+    fn english_line_h(self) -> f32 {
+        (self.active_size() * 1.3).ceil()
+    }
+
+    fn translation_size(self) -> f32 {
+        (self.active_size() * 0.54).round().max(10.0)
+    }
+
+    fn translation_line_h(self) -> f32 {
+        (self.translation_size() * 1.35).ceil()
+    }
+
+    fn weight(self) -> gpui::FontWeight {
+        gpui::FontWeight(f32::from(self.weight))
+    }
+}
+
 const LYRIC_BLOCK_GAP: f32 = 5.0;
 const LYRIC_ROW_PAD: f32 = 12.0;
 /// 译文显隐时向下/向上的位移。
@@ -215,10 +248,16 @@ fn lyrics_panel_width(window: &Window) -> f32 {
         .clamp(280.0, LYRIC_PANEL_W)
 }
 
+struct LyricTextLine {
+    text: gpui::SharedString,
+    width: f32,
+    tokens: Vec<LyricToken>,
+}
+
 /// 一行歌词的预计算排版。
 struct LyricsRow {
-    /// 英文按平衡断句拆成若干行；每行是带权重的 token，逐字点亮直接用。
-    english: Vec<Vec<LyricToken>>,
+    /// 主歌词按平衡断句拆成若干行，保留整行整形宽度用于扫色。
+    english: Vec<LyricTextLine>,
     /// 译文按面板宽度拆行；没有译文时是空串占位（高度仍然保留）。
     translation: Vec<String>,
     /// 整行高度（含上下内边距）。
@@ -233,13 +272,19 @@ struct LyricsRow {
 
 /// 整首歌的歌词排版缓存。滚动锚点、行高、断句都从这里读。
 pub(crate) struct LyricsLayout {
-    key: (u64, u32),
+    key: (u64, u32, u16, u16),
     rows: Vec<LyricsRow>,
     has_translation: bool,
 }
 
 impl LyricsLayout {
-    fn build(lyrics: &Lyrics, width: f32, window: &Window, key: (u64, u32)) -> Self {
+    fn build(
+        lyrics: &Lyrics,
+        width: f32,
+        typo: LyricTypography,
+        window: &Window,
+        key: (u64, u32, u16, u16),
+    ) -> Self {
         let available = (width - theme::space::SM * 2.0).max(120.0);
         let has_translation = lyrics.lines.iter().any(|line| {
             line.translation
@@ -254,27 +299,41 @@ impl LyricsLayout {
             f32::from(system.layout_line(text, px(size), &[run], None).width)
         };
 
+        let active_size = typo.active_size();
+        let active_weight = typo.weight();
+        let trans_size = typo.translation_size();
+        let english_line_h = typo.english_line_h();
+        let trans_line_h = typo.translation_line_h();
+
         let mut rows = Vec::with_capacity(lyrics.lines.len());
         let mut offset = 0.0;
         for line in &lyrics.lines {
             let english_tokens = split_overlong(lyric_tokens(&line.text), available, |text| {
-                measure(text, ENGLISH_ACTIVE, gpui::FontWeight::SEMIBOLD)
+                measure(text, active_size, active_weight)
             });
             let english_ranges = wrap_tokens(&english_tokens, available, &|text| {
-                measure(text, ENGLISH_ACTIVE, gpui::FontWeight::SEMIBOLD)
+                measure(text, active_size, active_weight)
             });
-            let english: Vec<Vec<LyricToken>> = english_ranges
+            let english: Vec<_> = english_ranges
                 .into_iter()
-                .map(|range| english_tokens[range].to_vec())
+                .map(|range| {
+                    let tokens = english_tokens[range].to_vec();
+                    let text: String = tokens.iter().map(|token| token.text.as_str()).collect();
+                    LyricTextLine {
+                        width: measure(&text, active_size, active_weight),
+                        text: text.into(),
+                        tokens,
+                    }
+                })
                 .collect();
 
             let translation: Vec<String> = if has_translation {
                 let raw = line.translation.clone().unwrap_or_default();
                 let tokens = split_overlong(lyric_tokens(&raw), available, |text| {
-                    measure(text, TRANSLATION_SIZE, gpui::FontWeight::NORMAL)
+                    measure(text, trans_size, gpui::FontWeight::NORMAL)
                 });
                 wrap_tokens(&tokens, available, &|text| {
-                    measure(text, TRANSLATION_SIZE, gpui::FontWeight::NORMAL)
+                    measure(text, trans_size, gpui::FontWeight::NORMAL)
                 })
                 .into_iter()
                 .map(|range| {
@@ -288,9 +347,9 @@ impl LyricsLayout {
                 Vec::new()
             };
 
-            let english_h = english.len().max(1) as f32 * ENGLISH_LINE_H;
+            let english_h = english.len().max(1) as f32 * english_line_h;
             let translation_h = if has_translation {
-                translation.len().max(1) as f32 * TRANSLATION_LINE_H
+                translation.len().max(1) as f32 * trans_line_h
             } else {
                 0.0
             };
@@ -327,9 +386,16 @@ impl LyricsLayout {
     }
 }
 
-/// 歌词或面板宽度变化时重建排版；同一份歌词同一宽度只算一次。
-fn ensure_lyrics_layout(root: &mut Root, lyrics: &Lyrics, seq: u64, width: f32, window: &Window) {
-    let key = (seq, (width * 2.0).round() as u32);
+/// 歌词或面板宽度/字体设置变化时重建排版；同一份配置只算一次。
+fn ensure_lyrics_layout(
+    root: &mut Root,
+    lyrics: &Lyrics,
+    seq: u64,
+    width: f32,
+    typo: LyricTypography,
+    window: &Window,
+) {
+    let key = (seq, (width * 2.0).round() as u32, typo.size, typo.weight);
     if root
         .lyrics_layout
         .as_ref()
@@ -337,7 +403,7 @@ fn ensure_lyrics_layout(root: &mut Root, lyrics: &Lyrics, seq: u64, width: f32, 
     {
         return;
     }
-    root.lyrics_layout = Some(LyricsLayout::build(lyrics, width, window, key));
+    root.lyrics_layout = Some(LyricsLayout::build(lyrics, width, typo, window, key));
 }
 
 fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> AnyElement {
@@ -395,7 +461,12 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
     } else {
         root.lyrics_translation_from
     };
-    ensure_lyrics_layout(root, &lyrics, lyrics_seq, panel_w, window);
+    let typo = LyricTypography::from_settings(&root.settings);
+    let lyrics_blur = root.settings.lyrics_blur;
+    let lyrics_staggered = root.settings.lyrics_staggered_scroll;
+    let lyrics_3d = root.settings.lyrics_3d_effect;
+    let continuous_sweep = root.settings.lyrics_continuous_sweep;
+    ensure_lyrics_layout(root, &lyrics, lyrics_seq, panel_w, typo, window);
     let layout = root.lyrics_layout.as_ref().expect("刚刚建好");
     let has_translation = layout.has_translation;
 
@@ -417,9 +488,24 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
         .lyrics_switch_at
         .is_some_and(|at| at.elapsed() < motion::duration::LYRIC_OUT);
     let position_ms = (root.display_position_seconds().max(0.0) * 1000.0).round() as u64;
+    let pending_color = theme::lyrics_pending();
+    let inactive_color = theme::lyrics_inactive();
+    let sung_color = theme::lyrics_sung();
     let entity = cx.entity();
     let hover_state = root.lyrics_hover;
     let scroll_handle = root.lyrics_scroll.clone();
+    let now = std::time::Instant::now();
+    let reading = root.lyrics_hold_until.is_some_and(|until| now < until);
+    let scroll_top = crate::ui::smooth_scroll::read(&scroll_handle);
+    let stagger = lyrics_staggered
+        .then_some(root.lyrics_scroll_stagger)
+        .flatten()
+        .map(|(at, start)| {
+            (
+                now.saturating_duration_since(at).as_secs_f32(),
+                scroll_top - start,
+            )
+        });
 
     // 上下留白让首行/末行也能滚到正中。用滚动句柄的实际视口高度；
     // 第一帧还没布局时用窗口高度减去顶栏和播放栏估算。
@@ -440,19 +526,56 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
             let is_active = synced && active == Some(index);
             let was_active = synced && prev_active == Some(index) && switch_recent;
             let distance = active.map(|active| active.abs_diff(index));
+            let depth = distance.unwrap_or(0).min(5) as f32;
+            let previous_depth =
+                prev_active.map_or(depth, |prev| prev.abs_diff(index).min(5) as f32);
+            let depth =
+                previous_depth + (depth - previous_depth) * motion::ease_in_out_cubic(out_t);
+            let row_top = pad + row.offset - scroll_top;
+            let visible = row_top + row.height > 0.0 && row_top < viewport_h;
+            let shift = match (stagger, active, distance) {
+                (Some((elapsed, scroll_delta)), Some(active), Some(distance @ 1..=6)) => {
+                    let lag = if index > active { 1.0 } else { 0.65 };
+                    let max_shift = row.height * 0.38;
+                    stagger_offset(
+                        elapsed,
+                        scroll_delta.clamp(-max_shift, max_shift) * lag,
+                        distance,
+                    )
+                }
+                _ => 0.0,
+            };
+            let center = row_top + row.height * 0.5 + shift - pad;
+            let (scale, inset, curve) = if lyrics_3d {
+                lyric_perspective(center, pad)
+            } else {
+                (1.0, 0.0, 0.0)
+            };
 
-            // 正在唱：按当前位置平滑点亮每个字；刚唱完的行保留整行点亮，
-            // 跟着退场动画缩小、变暗，避免切换瞬间从白色直接跳成灰色。
+            // 刚唱完的行保留整行点亮，
+            // 跟着退场动画缩小，并渐变到普通歌词颜色。
             let english = if is_active {
                 let wipe = line_progress(&lyrics, index, position_ms);
-                english_wipe(&row.english, wipe, theme::text())
+                let render = if continuous_sweep {
+                    english_wipe
+                } else {
+                    english_word_highlight
+                };
+                render(
+                    &row.english,
+                    wipe,
+                    pending_color,
+                    sung_color,
+                    typo.english_line_h(),
+                )
             } else if was_active {
                 english_plain(
                     &row.english,
-                    motion::mix_rgba(theme::text(), theme::text_muted(), out_t),
+                    motion::mix_rgba(sung_color, inactive_color, out_t),
+                    typo.english_line_h(),
                 )
             } else {
-                english_plain(&row.english, theme::text_muted())
+                english_plain(&row.english, inactive_color, typo.english_line_h())
             };
 
             // 主歌词单独包在固定高度的区域里：高亮只缩放文字本身，
@@ -464,20 +587,16 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
                 .flex_col()
                 .justify_center()
                 .text_size(px(if is_active || was_active {
-                    ENGLISH_ACTIVE
+                    typo.active_size()
                 } else {
-                    ENGLISH_BASE
+                    typo.base_size()
                 }))
-                .font_weight(if is_active || was_active {
-                    gpui::FontWeight::SEMIBOLD
-                } else {
-                    gpui::FontWeight::MEDIUM
-                })
+                .font_weight(typo.weight())
                 .child(english);
             let main = if is_active {
                 // 字号切换用图层缩放而不是逐帧改 font-size：文字只按高亮字号
                 // 光栅化一次，之后由 GPU 连续缩放，换行时不会因为重新排字卡一下。
-                let scale_from = ENGLISH_BASE / ENGLISH_ACTIVE;
+                let scale_from = typo.base_size() / typo.active_size();
                 main.with_animation(
                     gpui::ElementId::Name(format!("lyric-grow-{anim_seq}-{index}").into()),
                     motion::standard(motion::duration::LYRIC),
@@ -488,7 +607,7 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
                 )
                 .into_any_element()
             } else if was_active {
-                let scale_to = ENGLISH_BASE / ENGLISH_ACTIVE;
+                let scale_to = typo.base_size() / typo.active_size();
                 main.with_animation(
                     gpui::ElementId::Name(format!("lyric-shrink-{anim_seq}-{index}").into()),
                     motion::standard(motion::duration::LYRIC_OUT),
@@ -512,13 +631,13 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
                     .flex()
                     .flex_col()
                     .justify_center()
-                    .text_size(px(TRANSLATION_SIZE))
+                    .text_size(px(typo.translation_size()))
                     .font_weight(gpui::FontWeight::NORMAL);
                 for text in &row.translation {
                     block = block.child(
                         div()
                             .w_full()
-                            .h(px(TRANSLATION_LINE_H))
+                            .h(px(typo.translation_line_h()))
                             .flex()
                             .items_center()
                             .overflow_hidden()
@@ -563,12 +682,35 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
                 content = content.child(translation);
             }
 
-            // 整块亮度单独做动画：放大/缩小时主歌词与译文一起淡入淡出，
-            // 但字号缩放只发生在主歌词上。普通行保留随距离递减的空气感。
             let fade = match distance {
-                Some(0 | 1) => 1.0,
-                Some(2) => 0.86,
-                _ => 0.72,
+                None | Some(0) => 1.0,
+                _ if reading || hover_state.current == Some(index) => 0.96,
+                Some(1) => 0.94,
+                Some(2) => 0.78,
+                _ => 0.62,
+            };
+            if lyrics_blur
+                && visible
+                && !reading
+                && !is_active
+                && hover_state.current != Some(index)
+                && depth > 0.25
+            {
+                let blur_px = ((depth - 0.35).max(0.0) * 1.05 + 0.35).min(4.2);
+                content = content.blur(px(blur_px));
+            }
+            let (effective_scale, effective_inset) = if lyrics_3d && visible {
+                (scale, inset)
+            } else {
+                (1.0, 0.0)
+            };
+            let content = if lyrics_3d && visible {
+                content
+                    .pl(px(inset))
+                    .layer_scale_origin(gpui::point(0.0, 0.5))
+                    .layer_scale(scale)
+            } else {
+                content
             };
             let content = if is_active {
                 content
@@ -592,9 +734,43 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
                 content.opacity(fade).into_any_element()
             };
 
+            let active_weight = if is_active {
+                1.0
+            } else if was_active {
+                1.0 - motion::ease_in_out_cubic(out_t)
+            } else {
+                0.0
+            };
+            let content_h = (row.height - LYRIC_ROW_PAD * 2.0).max(1.0);
+            let hover_frame = lyric_hover_frame(
+                panel_w,
+                content_h,
+                row.english_h,
+                active_weight,
+                effective_scale,
+                effective_inset,
+            );
             let at_ms = lyrics.lines.get(index).and_then(|line| line.at_ms);
             let hover_entity = entity.clone();
             let click_entity = entity.clone();
+            let hover_pill = at_ms.and_then(|_| {
+                let layer = motion::row_hover_layer(
+                    "lyric-row",
+                    hover_state.fade_for(index),
+                    (theme::radius::ROW * effective_scale).max(6.0),
+                    theme::lyrics_hover_bg(is_active),
+                )?;
+                Some(
+                    div()
+                        .absolute()
+                        .left(px(hover_frame.left))
+                        .top(px(hover_frame.top))
+                        .w(px(hover_frame.width))
+                        .h(px(hover_frame.height))
+                        .child(layer),
+                )
+            });
+
             div()
                 .id(("lyric-line", index))
                 .relative()
@@ -603,19 +779,8 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
                 .flex()
                 .flex_col()
                 .justify_center()
-                .px(px(theme::space::SM))
-                .rounded(px(theme::radius::ROW))
                 .when(at_ms.is_some(), |this| {
                     this.cursor_pointer()
-                        .when_some(
-                            motion::row_hover_layer(
-                                "lyric-row",
-                                hover_state.fade_for(index),
-                                theme::radius::ROW,
-                                theme::surface_hover(),
-                            ),
-                            |this, layer| this.child(layer),
-                        )
                         .on_hover(move |hovered: &bool, _window, cx: &mut App| {
                             let next = if *hovered { Some(index) } else { None };
                             hover_entity.update(cx, |root, cx| {
@@ -641,7 +806,21 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
                             });
                         })
                 })
-                .child(content)
+                .child(
+                    div()
+                        .relative()
+                        .w_full()
+                        .h(px(content_h))
+                        .top(px(shift + curve))
+                        .when_some(hover_pill, |this, pill| this.child(pill))
+                        .child(
+                            div()
+                                .w_full()
+                                .h_full()
+                                .px(px(theme::space::SM))
+                                .child(content),
+                        ),
+                )
                 .into_any_element()
         })
         .collect::<Vec<_>>();
@@ -660,6 +839,7 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
             .flex_1()
             .min_h(px(0.0))
             .w_full()
+            .fade_edges(px(48.0), px(64.0))
             .child(
                 div()
                     .w_full()
@@ -701,59 +881,191 @@ fn translation_color(
 }
 
 /// 普通歌词行：预先拆好的多行文本，每行整段排版（保留字距与标点），不换行、不截断。
-fn english_plain(lines: &[Vec<LyricToken>], color: gpui::Rgba) -> AnyElement {
+fn english_plain(lines: &[LyricTextLine], color: gpui::Rgba, line_h: f32) -> AnyElement {
     let mut block = div().w_full().flex().flex_col();
-    for tokens in lines {
-        let text: String = tokens.iter().map(|token| token.text.as_str()).collect();
+    for line in lines {
         block = block.child(
             div()
                 .w_full()
-                .h(px(ENGLISH_LINE_H))
+                .h(px(line_h))
                 .flex()
                 .items_center()
                 .overflow_hidden()
-                .child(div().flex_none().text_color(color).child(text)),
+                .child(div().flex_none().text_color(color).child(line.text.clone())),
         );
     }
     block.into_any_element()
 }
 
-/// 当前行 / 上一行：按整行 token 权重从灰到目标色连续染色。
-fn english_wipe(lines: &[Vec<LyricToken>], wipe: f32, end: gpui::Rgba) -> AnyElement {
-    let total: f32 = lines
+fn english_word_highlight(
+    lines: &[LyricTextLine],
+    progress: f32,
+    pending_color: gpui::Rgba,
+    sung_color: gpui::Rgba,
+    line_h: f32,
+) -> AnyElement {
+    let total = lines
         .iter()
-        .flat_map(|tokens| tokens.iter())
+        .flat_map(|line| &line.tokens)
         .map(|token| token.weight)
-        .sum::<f32>()
-        .max(1.0);
-    let mut cumulative = 0.0;
+        .sum::<f32>();
+    let mut remaining = total * progress;
+    let highlight = gpui::HighlightStyle {
+        color: Some(sung_color.into()),
+        ..Default::default()
+    };
     let mut block = div().w_full().flex().flex_col();
-    for tokens in lines {
+    for line in lines {
+        let sung = sung_prefix_bytes(&line.tokens, &mut remaining);
+        let text = gpui::StyledText::new(line.text.clone())
+            .with_highlights((sung > 0).then_some((0..sung, highlight)));
+        block = block.child(
+            div()
+                .w_full()
+                .h(px(line_h))
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_color(pending_color)
+                        .child(text),
+                ),
+        );
+    }
+    block.into_any_element()
+}
+
+fn sung_prefix_bytes(tokens: &[LyricToken], remaining: &mut f32) -> usize {
+    let mut bytes = 0;
+    for token in tokens {
+        if *remaining < token.weight * 0.5 {
+            *remaining = 0.0;
+            break;
+        }
+        *remaining -= token.weight;
+        bytes += token.text.len();
+    }
+    bytes
+}
+
+/// LRC 只有行时间戳。用整形后的宽度推进扫色，保留字距和连字。
+fn english_wipe(
+    lines: &[LyricTextLine],
+    wipe: f32,
+    pending_color: gpui::Rgba,
+    sung_color: gpui::Rgba,
+    line_h: f32,
+) -> AnyElement {
+    let mut remaining = lines.iter().map(|line| line.width).sum::<f32>() * wipe;
+    let mut block = div().w_full().flex().flex_col();
+    for line in lines {
+        let sung_width = remaining.clamp(0.0, line.width);
+        remaining -= line.width;
+        let complete = sung_width >= line.width;
+        let text = |color| {
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .text_color(color)
+                .child(line.text.clone())
+        };
         let mut row = div()
+            .relative()
             .w_full()
-            .h(px(ENGLISH_LINE_H))
+            .h(px(line_h))
             .flex()
             .flex_row()
             .items_center()
-            .overflow_hidden();
-        for token in tokens {
-            let start = cumulative / total;
-            cumulative += token.weight;
-            let end_fraction = cumulative / total;
-            let span = (end_fraction - start).max(1e-6);
-            let raw = ((wipe - start) / span).clamp(0.0, 1.0);
-            // smoothstep：字的亮度在进入/离开时都有一段柔和的过渡。
-            let eased = raw * raw * (3.0 - 2.0 * raw);
+            .overflow_hidden()
+            .child(text(if complete { sung_color } else { pending_color }));
+        if !complete && sung_width > 0.0 {
             row = row.child(
                 div()
-                    .flex_none()
-                    .text_color(motion::mix_rgba(theme::text_muted(), end, eased))
-                    .child(token.text.clone()),
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .w(px(sung_width))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .fade_sides(px(0.0), px((line.width - sung_width).min(5.0)))
+                    .child(text(sung_color)),
             );
         }
         block = block.child(row);
     }
     block.into_any_element()
+}
+
+/// 用列表的真实滚动量补偿尚未开始移动的行，随后逐行归位。
+fn stagger_offset(elapsed: f32, scroll_delta: f32, distance: usize) -> f32 {
+    let delay = 0.095 * (1.0 - 0.75_f32.powi(distance as i32));
+    let t = ((elapsed - delay) / 0.30).clamp(0.0, 1.0);
+    scroll_delta * (1.0 - t * t * (3.0 - 2.0 * t))
+}
+
+/// 非当前行相对当前行的悬停底框宽度比例（不开立体时与 0.77 字号比例匹配）。
+const INACTIVE_HOVER_WIDTH_RATIO: f32 = 0.80;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LyricHoverFrame {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
+/// 计算单行歌词「虚选中」背景框的几何尺寸，随当前行字号比例、立体缩进与景深缩放同步，
+/// 保证悬停高亮严格贴合变换后的歌词块而不发生上下/左右错位。
+fn lyric_hover_frame(
+    panel_w: f32,
+    content_h: f32,
+    english_h: f32,
+    active_weight: f32,
+    scale: f32,
+    inset: f32,
+) -> LyricHoverFrame {
+    const PILL_PAD_Y: f32 = 7.0;
+    let active_weight = active_weight.clamp(0.0, 1.0);
+    let scale = scale.max(0.1);
+    let width_ratio =
+        INACTIVE_HOVER_WIDTH_RATIO + (1.0 - INACTIVE_HOVER_WIDTH_RATIO) * active_weight;
+    let left = (inset * scale).max(0.0);
+    let max_width = (panel_w - left).max(0.0);
+    let width = (panel_w * width_ratio * scale)
+        .min(max_width)
+        .max(120.0_f32.min(max_width));
+
+    let origin_y = content_h * 0.5;
+    let top_trim = english_h * 0.08 * (1.0 - active_weight);
+    let raw_top = -PILL_PAD_Y + top_trim;
+    let raw_bottom = content_h + PILL_PAD_Y;
+    let top = origin_y + (raw_top - origin_y) * scale;
+    let bottom = origin_y + (raw_bottom - origin_y) * scale;
+    let height = (bottom - top).max(20.0);
+
+    LyricHoverFrame {
+        left,
+        top,
+        width,
+        height,
+    }
+}
+
+/// 按行在视口中的实际位置投影，滚动过程中深度随位置连续变化。
+fn lyric_perspective(center: f32, half_height: f32) -> (f32, f32, f32) {
+    let distance = (center.abs() / half_height.max(1.0)).min(1.0);
+    let scale = 1.0 / (1.0 + 0.42 * distance.powf(1.3));
+    let depth = 1.0 - scale;
+    (
+        scale,
+        depth * 124.0,
+        -center.clamp(-half_height, half_height) * depth * 0.30,
+    )
 }
 
 /// 一行歌词的平衡式断句：先测量每个 token，再在合法单词边界上做动态规划。
@@ -961,6 +1273,31 @@ fn break_penalty(tokens: &[LyricToken], next: usize) -> f32 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn discrete_highlights_only_cover_complete_characters_and_words() {
+        let tokens = lyric_tokens("远方 hello");
+        assert_eq!(sung_prefix_bytes(&tokens, &mut 0.0), 0);
+        assert_eq!(sung_prefix_bytes(&tokens, &mut 0.5), "远".len());
+        assert_eq!(sung_prefix_bytes(&tokens, &mut 3.0), "远方 ".len());
+        assert_eq!(sung_prefix_bytes(&tokens, &mut 4.5), "远方 hello".len());
+    }
+
+    #[test]
+    fn stagger_follows_actual_scroll_and_far_lines_release_later() {
+        assert_eq!(stagger_offset(0.1, 0.0, 3), 0.0);
+        assert!(stagger_offset(0.1, 50.0, 3) > stagger_offset(0.1, 50.0, 1));
+        assert_eq!(stagger_offset(0.5, 50.0, 6), 0.0);
+    }
+
+    #[test]
+    fn perspective_keeps_center_full_size_and_recovers_symmetrically() {
+        assert_eq!(lyric_perspective(0.0, 400.0), (1.0, 0.0, 0.0));
+        let above = lyric_perspective(-400.0, 400.0);
+        let below = lyric_perspective(400.0, 400.0);
+        assert!(above.0 < 0.75 && above.1 > 30.0);
+        assert_eq!(above, (below.0, below.1, -below.2));
+    }
+
     /// 测试用等宽测量：每个字符 10px。
     fn mono(text: &str) -> f32 {
         text.chars().count() as f32 * 10.0
@@ -1001,5 +1338,25 @@ mod tests {
     fn short_line_stays_single() {
         let tokens = lyric_tokens("Hold on");
         assert_eq!(wrap_tokens(&tokens, 240.0, &mono), vec![0..tokens.len()]);
+    }
+
+    #[test]
+    fn lyric_hover_frame_distinguishes_active_and_tracks_3d_perspective() {
+        // 不开立体：当前行更宽，其余行保持完全一致的宽度与高度。
+        let active_2d = lyric_hover_frame(560.0, 64.0, 38.0, 1.0, 1.0, 0.0);
+        let near_2d = lyric_hover_frame(560.0, 64.0, 38.0, 0.0, 1.0, 0.0);
+        let far_2d = lyric_hover_frame(560.0, 64.0, 38.0, 0.0, 1.0, 0.0);
+        assert!(active_2d.width > near_2d.width);
+        assert_eq!(near_2d, far_2d);
+        assert_eq!(active_2d.left, 0.0);
+        assert_eq!(near_2d.left, 0.0);
+
+        // 开启立体：越远缩放越小、左缩进越大，虚选中越窄且左缘紧跟文本缩进。
+        let near_3d = lyric_hover_frame(560.0, 64.0, 38.0, 0.0, 0.94, 7.5);
+        let far_3d = lyric_hover_frame(560.0, 64.0, 38.0, 0.0, 0.72, 34.7);
+        assert!(near_2d.width > near_3d.width);
+        assert!(near_3d.width > far_3d.width);
+        assert!((far_3d.left - 34.7 * 0.72).abs() < 1e-4);
+        assert!(far_3d.height < near_3d.height);
     }
 }

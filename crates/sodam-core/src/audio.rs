@@ -473,13 +473,13 @@ fn rebuild_player_at(
         loudness_gain_bits,
         initial_gain,
     ));
-    // 先暂停并完成 seek，再挂到 mixer，避免 seek 失败时向 mixer 泄漏空转 source，
-    // 也避免 seek 完成前往旧起点漏出几毫秒声音。
+    // 先暂停并挂到 mixer，再执行 try_seek：rodio 的 try_seek 需要音频回调驱动才会返回，
+    // 挂入前已 pause()，不会从旧起点漏出声音。
     player.pause();
+    mixer.add(source);
     if position > std::time::Duration::ZERO && player.try_seek(position).is_err() {
         return Err("音频源不支持后退/跳转".to_string());
     }
-    mixer.add(source);
     if !paused {
         player.play();
     }

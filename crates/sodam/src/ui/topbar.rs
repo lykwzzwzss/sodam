@@ -24,6 +24,8 @@ pub(crate) fn render(
     let rescan_fade = root.hovers.get("topbar-rescan");
     let folder_fade = root.hovers.get("topbar-local-folder");
     let taskbar_fade = root.hovers.get("topbar-taskbar-player");
+    let theme_fade = root.hovers.get("topbar-theme-mode");
+    let light_mode = root.settings.light_mode;
     let taskbar_on = root.settings.taskbar_player;
     let mut bar = div()
         .flex()
@@ -34,8 +36,7 @@ pub(crate) fn render(
         .flex_none()
         .pl(px(theme::space::LG))
         .pr(px(0.0))
-        // 顶栏是半透明黑条（汽水音乐同款）；下方内容滚动时会从这里透出来。
-        .bg(gpui::rgba(0x00000030))
+        .bg(theme::toolbar())
         .border_b_1()
         .border_color(theme::border());
 
@@ -120,6 +121,14 @@ pub(crate) fn render(
                 |root, cx| root.toggle_taskbar_player(cx),
             ))
         })
+        .child(round_icon_button(
+            "topbar-theme-mode",
+            if light_mode { "moon" } else { "sun" },
+            ACTION_ICON,
+            theme_fade,
+            cx,
+            |root, cx| root.toggle_light_mode(cx),
+        ))
         .child(if own_titlebar {
             titlebar::controls(root, window, cx).into_any_element()
         } else {
@@ -293,9 +302,9 @@ fn search_box(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> impl 
             (theme::accent(), theme::border())
         };
         let (bg_from, bg_to) = if focused {
-            (theme::surface_elevated(), gpui::rgba(0xFFFFFF12))
+            (theme::surface_elevated(), theme::surface_hover())
         } else {
-            (gpui::rgba(0xFFFFFF12), theme::surface_elevated())
+            (theme::surface_hover(), theme::surface_elevated())
         };
         search
             .with_animation(

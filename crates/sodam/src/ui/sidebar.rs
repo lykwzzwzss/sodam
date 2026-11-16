@@ -84,7 +84,7 @@ fn playlist_row(
     anim: SidebarRowAnim,
     cx: &mut gpui::Context<Root>,
 ) -> AnyElement {
-    // 背景只有一层：悬停 7% 白、选中 13% 白，由同一个透明度插值，
+    // 悬停与选中共用一层背景，由同一个透明度插值，
     // 不会出现「hover + selected」两层叠加偏亮。
     let background = div()
         .absolute()
@@ -94,7 +94,7 @@ fn playlist_row(
         .rounded(px(theme::radius::ROW));
     let background = if anim.bg.seq == 0 || anim.bg.from == anim.bg.to {
         background
-            .bg(theme::rgba(255, 255, 255, anim.bg.to))
+            .bg(theme::selection_tint(anim.bg.to))
             .into_any_element()
     } else {
         background
@@ -103,7 +103,7 @@ fn playlist_row(
                 motion::standard(anim.bg.duration),
                 move |this, delta| {
                     let alpha = anim.bg.from + (anim.bg.to - anim.bg.from) * delta;
-                    this.bg(theme::rgba(255, 255, 255, alpha))
+                    this.bg(theme::selection_tint(alpha))
                 },
             )
             .into_any_element()
@@ -506,43 +506,62 @@ pub fn render(
                 .border_color(theme::border())
                 .child({
                     let settings_selected = root.settings_open && !root.player_view_open;
+                    let settings_fade = root.hovers.get("nav-settings");
                     div()
                         .id("nav-settings")
                         .relative()
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(theme::space::SM))
-                        .h(px(36.0))
+                        .gap(px(theme::space::MD))
+                        .h(px(PLAYLIST_ROW_H))
                         .px(px(theme::space::MD))
                         .rounded(px(theme::radius::ROW))
                         .cursor_pointer()
-                        .text_size(theme::Text::Body.size())
-                        .when(settings_selected, |this| {
-                            this.bg(theme::surface_hover())
-                                .text_color(theme::text())
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .left(px(0.0))
-                                        .top(px(8.0))
-                                        .bottom(px(8.0))
-                                        .w(px(3.0))
-                                        .rounded(px(theme::radius::PILL))
-                                        .bg(theme::accent()),
-                                )
-                        })
                         .when(!settings_selected, |this| {
-                            this.text_color(theme::text_muted()).hover(|style| {
-                                style.bg(theme::surface_hover()).text_color(theme::text())
-                            })
+                            this.child(motion::hover_layer(
+                                "nav-settings-bg",
+                                settings_fade,
+                                theme::radius::ROW,
+                                theme::surface_hover(),
+                            ))
+                        })
+                        .when(settings_selected, |this| {
+                            this.bg(theme::surface_selected()).child(
+                                div()
+                                    .absolute()
+                                    .left(px(2.0))
+                                    .top(px((PLAYLIST_ROW_H - 18.0) * 0.5))
+                                    .w(px(3.0))
+                                    .h(px(18.0))
+                                    .rounded(px(1.5))
+                                    .bg(theme::accent()),
+                            )
+                        })
+                        .on_hover(Root::hover_listener(cx, "nav-settings"))
+                        .text_size(theme::Text::Body.size())
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(if settings_selected {
+                            theme::text()
+                        } else {
+                            theme::text_muted()
                         })
                         .on_click(cx.listener(|root, _: &ClickEvent, _window, cx| {
                             root.player_view_open = false;
                             root.settings_open = true;
                             cx.notify();
                         }))
+                        .child(
+                            svg()
+                                .path(icons::path("settings"))
+                                .size(px(theme::ICON))
+                                .flex_none()
+                                .text_color(if settings_selected {
+                                    theme::text()
+                                } else {
+                                    theme::text_muted()
+                                }),
+                        )
                         .child(root.tr("设置").to_string())
                 }),
         )

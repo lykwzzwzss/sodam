@@ -25,6 +25,9 @@ pub struct Palette {
     /// 背景用 `base[6]`（base-7），渐变用 `base[4]`（base-5），
     /// 进度/高亮用 `base[2]`（base-3）；灰白封面回退到中性灰阶。
     pub base: [[u8; 3]; 9],
+    /// 封面多色流光光斑（最多 4 组在 OKLab 中拉开色距的封面色）。
+    /// 灰白封面时保持细腻中性冷灰，不凭空染假彩。
+    pub glow: [[u8; 3]; 4],
     /// 封面是否有可用的彩色（最大彩度达到阈值）。
     pub colorful: bool,
 }
@@ -35,7 +38,7 @@ impl Palette {
     /// 页面背景用 `base[4] → base[7]`，侧栏/播放栏用半透明的 `base[6]`：
     /// 这组值让页面回到中性深灰，切换封面时结构不跳变，只做颜色插值。
     pub const NEUTRAL_DARK: Palette = Palette {
-        accent: [0x00, 0xCB, 0x64],
+        accent: [0x46, 0x46, 0x49],
         dominant: [0x12, 0x12, 0x14],
         ambient: [0x0E, 0x0E, 0x10],
         base: [
@@ -48,6 +51,12 @@ impl Palette {
             [0x1E, 0x1E, 0x22],
             [0x05, 0x05, 0x06],
             [0x03, 0x03, 0x04],
+        ],
+        glow: [
+            [0x34, 0x3A, 0x48],
+            [0x2A, 0x30, 0x3D],
+            [0x3E, 0x3B, 0x4A],
+            [0x26, 0x2B, 0x36],
         ],
         colorful: false,
     };
@@ -79,6 +88,7 @@ impl Palette {
             dominant: mix(from.dominant, to.dominant, t),
             ambient: mix(from.ambient, to.ambient, t),
             base: std::array::from_fn(|index| mix(from.base[index], to.base[index], t)),
+            glow: std::array::from_fn(|index| mix(from.glow[index], to.glow[index], t)),
             colorful: from.colorful || to.colorful,
         }
     }
@@ -212,12 +222,18 @@ pub fn palette_from_rgba(rgba: &[u8], width: u32, height: u32) -> Palette {
     } else {
         Palette::NEUTRAL_DARK.base
     };
+    let glow = if colorful {
+        glow_palette(&clusters, total_weight, vibrant.lab)
+    } else {
+        Palette::NEUTRAL_DARK.glow
+    };
 
     Palette {
         accent,
         dominant,
         ambient,
         base,
+        glow,
         colorful,
     }
 }
@@ -417,6 +433,82 @@ fn base_ramp(lab: [f32; 3]) -> [[u8; 3]; 9] {
         ramp[index] = oklab_to_rgb([*lightness, lab[1] * scale, lab[2] * scale]);
     }
     ramp
+}
+
+/// 从封面色彩聚类中挑出最多 4 组在 OKLab 里色距充分拉开的光斑色，
+/// 用于全局动态流光的四象限配色；少于 4 簇时在同一色系内补出柔和层次。
+fn glow_palette(clusters: &[Cluster], total_weight: f64, seed: [f32; 3]) -> [[u8; 3]; 4] {
+    let normalize_orb = |lab: [f32; 3]| -> [f32; 3] {
+        let chroma = chroma_of(lab);
+        let scale = if chroma > 1e-5 {
+            (0.14 / chroma).clamp(0.75, 1.55)
+        } else {
+            1.0
+        };
+        [lab[0].clamp(0.46, 0.72), lab[1] * scale, lab[2] * scale]
+    };
+
+    let candidates: Vec<(f64, [f32; 3])> = clusters
+        .iter()
+        .filter(|cluster| chroma_of(cluster.lab) >= 0.025)
+        .map(|cluster| {
+            let chroma = chroma_of(cluster.lab);
+            let share = (cluster.weight / total_weight).max(1e-6);
+            let base_score = share.powf(0.35) * (0.18 + f64::from(chroma) * 2.8);
+            (base_score, normalize_orb(cluster.lab))
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return Palette::NEUTRAL_DARK.glow;
+    }
+
+    let mut chosen: Vec<[f32; 3]> = Vec::with_capacity(4);
+    chosen.push(normalize_orb(seed));
+
+    while chosen.len() < 4 {
+        let mut best: Option<(f64, [f32; 3])> = None;
+        for (base_score, lab) in &candidates {
+            let min_dist_sq = chosen
+                .iter()
+                .map(|picked| lab_distance_sq(*picked, *lab))
+                .fold(f32::INFINITY, f32::min);
+            // 仅在还算明显不同色时继续从封面聚类吸纳新色
+            if min_dist_sq < 0.004 {
+                continue;
+            }
+            let diversity = f64::from(min_dist_sq.sqrt().min(0.32));
+            let score = *base_score * (0.35 + diversity * 3.0);
+            if best
+                .as_ref()
+                .is_none_or(|(best_score, _)| score > *best_score)
+            {
+                best = Some((score, *lab));
+            }
+        }
+        match best {
+            Some((_, lab)) => chosen.push(lab),
+            None => break,
+        }
+    }
+
+    // 若封面只有 1~2 种彩色，从已有簇里做轻微色相偏移和明暗错落补足 4 个光斑
+    let base_count = chosen.len();
+    let hue_offsets: [f32; 4] = [0.0, 0.28, -0.26, 0.14];
+    let light_offsets: [f32; 4] = [0.0, -0.07, 0.06, -0.03];
+    while chosen.len() < 4 {
+        let idx = chosen.len();
+        let src = chosen[idx % base_count];
+        let angle = hue_offsets[idx];
+        let (sin, cos) = angle.sin_cos();
+        chosen.push([
+            (src[0] + light_offsets[idx]).clamp(0.42, 0.76),
+            src[1] * cos - src[2] * sin,
+            src[1] * sin + src[2] * cos,
+        ]);
+    }
+
+    std::array::from_fn(|i| oklab_to_rgb(chosen[i]))
 }
 
 fn bell(value: f32, center: f32, width: f32) -> f32 {
@@ -802,5 +894,33 @@ mod tests {
         assert_ne!(middle, colored);
         assert_ne!(middle.base[4], neutral.base[4]);
         assert_ne!(middle.base[4], colored.base[4]);
+        // 红色封面和灰阶兜底之间的每一帧都不应引入品牌绿。
+        for step in 0..=20 {
+            let [red, green, _] = Palette::lerp(neutral, colored, step as f32 / 20.0).accent;
+            assert!(red >= green);
+        }
+    }
+
+    #[test]
+    fn glow_extracts_distinct_colors_from_multicolor_cover() {
+        let mut data = solid(48, 48, [220, 45, 95]);
+        for y in 0..48u32 {
+            for x in 0..48u32 {
+                let offset = ((y * 48 + x) * 4) as usize;
+                let color = if x >= 24 && y < 24 {
+                    [40, 110, 235]
+                } else if (12..36).contains(&x) && y >= 24 {
+                    [255, 190, 70]
+                } else {
+                    [220, 45, 95]
+                };
+                data[offset..offset + 3].copy_from_slice(&color);
+            }
+        }
+        let palette = palette_from_rgba(&data, 48, 48);
+        assert!(palette.colorful);
+        assert_ne!(palette.glow[0], palette.glow[1]);
+        assert!(palette.glow.iter().any(|c| c[0] > c[2] + 30));
+        assert!(palette.glow.iter().any(|c| c[2] > c[0] + 30));
     }
 }

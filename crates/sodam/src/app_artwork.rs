@@ -133,7 +133,7 @@ impl Root {
     /// 切歌单时先用歌单里第一首已预热曲目的色板过渡（没有单曲在播时才生效）。
     pub(crate) fn preview_playlist_palette(&mut self, index: usize, cx: &mut Context<Self>) {
         // 正在播某首歌时，背景色属于这首歌，不跟着歌单列表跳。
-        if self.artwork.is_some() {
+        if self.artwork.is_some() || self.artwork_pending {
             return;
         }
         let Some(library) = self.local_library.as_ref() else {
@@ -405,15 +405,18 @@ impl Root {
         path: PathBuf,
         cx: &mut Context<Self>,
     ) {
+        let seq = self.artwork_seq.wrapping_add(1);
+        self.artwork_seq = seq;
         if self
             .artwork
             .as_ref()
             .is_some_and(|art| art.track_id == track.id)
         {
+            self.artwork_pending = false;
+            self.apply_artwork_palette(cx);
             return;
         }
-        let seq = self.artwork_seq.wrapping_add(1);
-        self.artwork_seq = seq;
+        self.artwork_pending = true;
         let track_id = track.id.clone();
         // 预热产物：原图缓存文件 + 色板。有它就不再为这一首重新解析标签。
         let key = path.to_string_lossy().to_string();
@@ -435,6 +438,7 @@ impl Root {
     }
 
     fn set_current_artwork(&mut self, art: Option<ArtworkView>, cx: &mut Context<Self>) {
+        self.artwork_pending = false;
         self.artwork = art;
         self.apply_artwork_palette(cx);
         cx.notify();
@@ -496,7 +500,9 @@ impl Root {
 
     fn set_playlist_artwork(&mut self, art: Option<ArtworkView>, cx: &mut Context<Self>) {
         self.playlist_art = art;
-        self.apply_artwork_palette(cx);
+        if self.artwork.is_none() && !self.artwork_pending {
+            self.apply_artwork_palette(cx);
+        }
         cx.notify();
     }
 

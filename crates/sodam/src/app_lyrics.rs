@@ -29,6 +29,7 @@ impl Root {
         self.lyrics_prev_active = None;
         self.lyrics_switch_at = None;
         self.lyrics_scroll_line = None;
+        self.lyrics_scroll_stagger = None;
         self.lyrics_hold_until = None;
         let track_id = track.id.clone();
         let loaded = cx.background_spawn(async move { sodam_core::lyrics::load(&path) });
@@ -84,6 +85,7 @@ impl Root {
         self.lyrics_prev_active = None;
         self.lyrics_switch_at = None;
         self.lyrics_scroll_line = None;
+        self.lyrics_scroll_stagger = None;
         self.lyrics_hold_until = None;
         self.sync_lyrics_position(cx);
         cx.notify();

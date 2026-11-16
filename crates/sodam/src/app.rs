@@ -362,8 +362,6 @@ pub struct Root {
     pub(crate) local_scroll: gpui::UniformListScrollHandle,
     /// 滚轮平滑滚动状态：每个列表一个槽位，逐帧缓动推进。
     pub(crate) scroll_anims: ui::smooth_scroll::ScrollAnims,
-    /// 滚动缓动循环是否已经在跑（避免同一帧重复起循环）。
-    pub(crate) scroll_anim_loop: bool,
     /// 侧栏歌单列表的滚动句柄（滚轮缓动 + 与主列表隔离）。
     pub(crate) sidebar_scroll: gpui::ScrollHandle,
     /// 队列抽屉的滚动句柄（打开时锚到「正在播放」）。
@@ -431,6 +429,11 @@ pub struct Root {
     pub(crate) palette_anim: Option<PaletteAnim>,
     /// 封面异步请求序号：旧请求回来时不能覆盖新曲目。
     pub(crate) artwork_seq: u64,
+    pub(crate) artwork_pending: bool,
+    flow_clock: ui::backdrop::FlowClock,
+    pub(crate) light_mode_anim: Option<(f32, f32, std::time::Instant)>,
+    pub(crate) flow_mix_anim: Option<(f32, f32, std::time::Instant)>,
+    pub(crate) flow_target: f32,
     /// 歌单封面异步请求序号（选中的歌单可能很快又被换掉）。
     pub(crate) playlist_art_seq: u64,
     /// 曲目缩略图缓存：绝对路径 → 96px PNG（`None` = 这首歌没有内嵌封面）。
@@ -457,6 +460,9 @@ pub struct Root {
     pub(crate) settings_open: bool,
     /// 设置页滚动句柄。
     pub(crate) settings_scroll: gpui::ScrollHandle,
+    pub(crate) settings_active_section: usize,
+    pub(crate) settings_scroll_lock_until: Option<std::time::Instant>,
+    pub(crate) settings_slider_drag: Option<&'static str>,
     /// 当前曲目的歌词（内嵌歌词 / 侧车 .lrc）。
     pub(crate) lyrics: Option<Arc<Lyrics>>,
     /// 歌词排版缓存：断句、动态行高与累计偏移；歌词或面板宽度变化时重建。
@@ -481,6 +487,8 @@ pub struct Root {
     pub(crate) lyrics_scroll: gpui::ScrollHandle,
     /// 上一次居中的行号：行号变化或手动滚开后重新锚定。
     pub(crate) lyrics_scroll_line: Option<usize>,
+    pub(crate) lyrics_scroll_stagger: Option<(std::time::Instant, f32)>,
+    pub(crate) lyrics_last_seek: Option<std::time::Instant>,
     /// 用户手动滚歌词后的暂停跟随时间。
     pub(crate) lyrics_hold_until: Option<std::time::Instant>,
     /// 进度插值锚点：心跳拿到新的 position 时重置，播放中每帧按经过时间外推。
@@ -503,6 +511,13 @@ impl Root {
         // 配置里的「详细日志」要覆盖启动就生效：日志出口在 `main` 里已建好，
         // 这里补上开关状态（环境变量那一路已在出口初始化时读过，两者取并集）。
         log_outlet::set_global_detailed(settings.detailed_logs);
+        theme::set_light_mix(if settings.light_mode { 1.0 } else { 0.0 });
+        let initial_flow = if settings.flowing_background && settings.flowing_background_global {
+            1.0
+        } else {
+            0.0
+        };
+        theme::set_flow_mix(initial_flow);
         let engine = PlaybackEngine::with_volume(settings.volume);
         engine.set_loudness_equalization(settings.loudness_equalization);
         let mut settings = settings;
@@ -629,7 +644,6 @@ impl Root {
             local_loading_visible: false,
             local_scroll: gpui::UniformListScrollHandle::new(),
             scroll_anims: ui::smooth_scroll::ScrollAnims::default(),
-            scroll_anim_loop: false,
             sidebar_scroll: gpui::ScrollHandle::new(),
             queue_scroll: gpui::UniformListScrollHandle::new(),
             queue_open: false,
@@ -652,6 +666,11 @@ impl Root {
             palette_current: sodam_core::artwork::Palette::NEUTRAL_DARK,
             palette_anim: None,
             artwork_seq: 0,
+            artwork_pending: false,
+            flow_clock: ui::backdrop::FlowClock::default(),
+            light_mode_anim: None,
+            flow_mix_anim: None,
+            flow_target: initial_flow,
             playlist_art_seq: 0,
             cover_thumbs: std::sync::Arc::new(HashMap::new()),
             cover_palettes: HashMap::new(),
@@ -663,6 +682,9 @@ impl Root {
             player_view_open: false,
             settings_open: false,
             settings_scroll: gpui::ScrollHandle::new(),
+            settings_active_section: 0,
+            settings_scroll_lock_until: None,
+            settings_slider_drag: None,
             lyrics: None,
             lyrics_layout: None,
             lyrics_translation_seq: 0,
@@ -676,6 +698,8 @@ impl Root {
             lyrics_switch_at: None,
             lyrics_scroll: gpui::ScrollHandle::new(),
             lyrics_scroll_line: None,
+            lyrics_scroll_stagger: None,
+            lyrics_last_seek: None,
             lyrics_hold_until: None,
             progress_anchor_at: std::time::Instant::now(),
             progress_anchor_seconds: 0.0,
@@ -1040,6 +1064,59 @@ impl Root {
         self.set_status_text(self.localized(key, args));
     }
 
+    /// 浅色/深色模式切换：记录目标并用渲染帧连续过渡主题色。
+    pub(crate) fn toggle_light_mode(&mut self, cx: &mut Context<Self>) {
+        self.settings.light_mode = !self.settings.light_mode;
+        let to = if self.settings.light_mode { 1.0 } else { 0.0 };
+        let from = theme::light_mix();
+        self.light_mode_anim = Some((from, to, std::time::Instant::now()));
+        if let Err(error) = self.settings.save() {
+            let message = self.failure_text("保存主题设置失败", &error, SAVE_TEXT);
+            self.set_status_text(message);
+        }
+        cx.notify();
+    }
+
+    fn tick_light_mode(&mut self, window: &mut Window) {
+        let Some((from, to, started)) = self.light_mode_anim else {
+            return;
+        };
+        let raw = (started.elapsed().as_secs_f32() / 0.42).clamp(0.0, 1.0);
+        let eased = ui::motion::ease_in_out_cubic(raw);
+        theme::set_light_mix(from + (to - from) * eased);
+        if raw >= 1.0 {
+            self.light_mode_anim = None;
+        } else {
+            window.request_animation_frame();
+        }
+    }
+
+    /// 随设置项（总开关/全局应用）或当前页切入切出，平滑淡入/淡出流光与磨砂感。
+    fn tick_flow_mix(&mut self, window: &mut Window) {
+        let target = if self.settings.flowing_background
+            && (self.settings.flowing_background_global || self.player_view_open)
+        {
+            1.0
+        } else {
+            0.0
+        };
+        if (self.flow_target - target).abs() > f32::EPSILON {
+            self.flow_target = target;
+            self.flow_mix_anim = Some((theme::flow_mix(), target, std::time::Instant::now()));
+        }
+        let Some((from, to, started)) = self.flow_mix_anim else {
+            return;
+        };
+        let raw = (started.elapsed().as_secs_f32() / 0.42).clamp(0.0, 1.0);
+        let eased = ui::motion::ease_in_out_cubic(raw);
+        theme::set_flow_mix(from + (to - from) * eased);
+        if raw >= 1.0 {
+            self.flow_mix_anim = None;
+        } else {
+            window.request_animation_frame();
+        }
+    }
+
     /// 任务栏快捷播控开关：立刻起停宿主，并写入配置。
     pub(crate) fn toggle_taskbar_player(&mut self, cx: &mut Context<Self>) {
         self.settings.taskbar_player = !self.settings.taskbar_player;
@@ -1156,12 +1233,21 @@ impl Render for Root {
         // 颜色过渡和歌词高亮都按显示刷新率推进：渲染一帧就前进一步，
         // 不再用 16ms 定时器把动画限制在 60fps。
         self.tick_palette(window);
+        self.tick_light_mode(window);
+        self.tick_flow_mix(window);
+        self.step_scroll_anims(window);
         self.sync_now_playing(window);
         if self.player_view_open {
             self.sync_lyrics_position(cx);
             self.tick_lyrics_center(window, cx);
         }
-        if self.engine.snapshot().playing {
+        let playing = self.engine.snapshot().playing;
+        let now = std::time::Instant::now();
+        let flow_phase = self.flow_clock.advance(
+            now,
+            playing && self.settings.flowing_background && theme::flow_mix() > 0.001,
+        );
+        if playing {
             // 进度条/歌词的插值位置每帧都在变，播放期间持续请求下一帧。
             window.request_animation_frame();
         }
@@ -1181,8 +1267,8 @@ impl Render for Root {
                     }
                 }),
             )
-            // 全窗背景：9 阶主题色组成的整页色场，所有面板都叠在它上面。
-            .child(ui::backdrop::render())
+            // 全窗背景：多色流光光斑与基础底色，所有透明磨砂面板都叠在它上面。
+            .child(ui::backdrop::render(flow_phase))
             .child(
                 div()
                     .flex()

@@ -65,11 +65,17 @@ pub fn prepare(
         }
     }
 
-    // 色板已经预热过：这次切歌完全不需要解码。
+    // 已有缩略图就用小图算色板，避免为了背景再次解码原图。
     let palette = match cached_palette {
         Some(palette) => palette,
         None => {
-            let sampled = image::load_from_memory(&bytes).ok()?.thumbnail(256, 256);
+            let sampled = image::open(cache_dir.join(format!("thumb-{key}.png")))
+                .ok()
+                .or_else(|| {
+                    image::load_from_memory(&bytes)
+                        .ok()
+                        .map(|image| image.thumbnail(256, 256))
+                })?;
             let rgba = sampled.to_rgba8();
             artwork::palette_from_rgba(rgba.as_raw(), sampled.width(), sampled.height())
         }

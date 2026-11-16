@@ -96,6 +96,9 @@ icon_set!(
     "windows-restore",
     "windows-close",
     "disc-3",
+    "sun",
+    "moon",
+    "settings",
 );
 
 /// 图标的资产路径，喂给 `svg().path(icons::path("play"))`。

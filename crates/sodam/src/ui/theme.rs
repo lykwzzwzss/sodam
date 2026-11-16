@@ -1,11 +1,10 @@
 //! 主题：颜色、尺寸、字号、圆角、图标尺寸。
 //!
-//! 视觉基调对齐汽水音乐桌面端：固定深色、低对比的磨砂面板、封面取色驱动的
-//! 整页氛围、大圆角与大号控件。颜色分两类：
+//! 深色主题用封面取色铺开背景，浅色主题以中性色为底，保留少量封面色。
+//! 磨砂面板、大圆角和大号控件沿用同一套尺寸。颜色分两类：
 //!
-//! 1. **结构色**（文字/描边/悬停）是固定的白色透明度阶梯；
-//! 2. **主题色**来自当前封面（`Palette`）的 9 阶色板，铺满整页背景，
-//!    并让侧栏/播放栏以半透明磨砂的形式透出这层颜色。
+//! 1. **结构色**用于文字、描边和交互状态，随深浅主题过渡；
+//! 2. **主题色**来自当前封面（`Palette`）的 9 阶色板，用于背景和强调色。
 //!
 //! 所有尺寸从同一组常量派生，页面里不再散落 magic number。
 
@@ -34,14 +33,45 @@ pub fn rgba(r: u8, g: u8, b: u8, a: f32) -> Rgba {
 
 /// 封面主题色（bit31 表示存在；低 24 位 RGB）。
 static ACCENT_COLOR: AtomicU32 = AtomicU32::new(0);
-/// 封面环境色（压暗后的主色，用于背景深处的第二层色场）。
-static AMBIENT_COLOR: AtomicU32 = AtomicU32::new(0);
-/// 封面占比最大的颜色：和强调色错开，让整页不是一个单色块。
-static DOMINANT_COLOR: AtomicU32 = AtomicU32::new(0);
 /// 封面是否有彩色；无彩色时界面用品牌绿。
 static ACCENT_COLORFUL: AtomicU8 = AtomicU8::new(0);
+/// 浅色模式插值系数（0.0 = 深色，1.0 = 浅色），存 f32::to_bits。
+static LIGHT_MIX_BITS: AtomicU32 = AtomicU32::new(0);
+/// 流光展示插值系数（0.0 = 静态氛围底色，1.0 = 流动光斑与磨砂通透感）。
+static FLOW_MIX_BITS: AtomicU32 = AtomicU32::new(0x3F80_0000);
+/// 设置浅色模式插值系数（0.0..=1.0），用于深浅切换动画逐帧过渡。
+pub fn set_light_mix(mix: f32) {
+    LIGHT_MIX_BITS.store(mix.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+}
+
+/// 当前浅色模式插值系数（0.0 = 深色，1.0 = 浅色）。
+pub fn light_mix() -> f32 {
+    f32::from_bits(LIGHT_MIX_BITS.load(Ordering::Relaxed)).clamp(0.0, 1.0)
+}
+
+/// 设置流光可见强度（0.0..=1.0），用于开关流光或切换页面时平滑淡入淡出。
+pub fn set_flow_mix(mix: f32) {
+    FLOW_MIX_BITS.store(mix.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+}
+
+pub fn flow_mix() -> f32 {
+    f32::from_bits(FLOW_MIX_BITS.load(Ordering::Relaxed)).clamp(0.0, 1.0)
+}
+
+fn lerp_rgba(dark: Rgba, light: Rgba) -> Rgba {
+    let t = light_mix();
+    if t <= 0.0 {
+        return dark;
+    }
+    if t >= 1.0 {
+        return light;
+    }
+    super::motion::mix_rgba(dark, light, t)
+}
 /// 9 阶主题色（base-1..9）；bit31 表示这一阶有值。
 static BASE_COLORS: [AtomicU32; 9] = [const { AtomicU32::new(0) }; 9];
+/// 4 组封面多色流光色；bit31 表示有效。
+static GLOW_COLORS: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
 
 /// 汽水音乐的品牌绿：没有封面 / 灰白封面时的强调色。
 pub const BRAND_GREEN: u32 = 0x00CB64;
@@ -54,17 +84,16 @@ pub fn set_ambient_palette(palette: Option<Palette>) {
     match palette {
         Some(palette) => {
             ACCENT_COLOR.store(pack_rgb(palette.accent), Ordering::Relaxed);
-            AMBIENT_COLOR.store(pack_rgb(palette.ambient), Ordering::Relaxed);
-            DOMINANT_COLOR.store(pack_rgb(palette.dominant), Ordering::Relaxed);
             ACCENT_COLORFUL.store(u8::from(palette.colorful), Ordering::Relaxed);
             for (slot, color) in BASE_COLORS.iter().zip(palette.base.iter()) {
+                slot.store(pack_rgb(*color), Ordering::Relaxed);
+            }
+            for (slot, color) in GLOW_COLORS.iter().zip(palette.glow.iter()) {
                 slot.store(pack_rgb(*color), Ordering::Relaxed);
             }
         }
         None => {
             ACCENT_COLOR.store(0, Ordering::Relaxed);
-            AMBIENT_COLOR.store(0, Ordering::Relaxed);
-            DOMINANT_COLOR.store(0, Ordering::Relaxed);
             ACCENT_COLORFUL.store(0, Ordering::Relaxed);
             seed_neutral_base();
         }
@@ -74,6 +103,9 @@ pub fn set_ambient_palette(palette: Option<Palette>) {
 /// 写入深色中性 9 阶色板（无封面 / 灰阶封面的页面与面板底色）。
 fn seed_neutral_base() {
     for (slot, color) in BASE_COLORS.iter().zip(Palette::NEUTRAL_DARK.base.iter()) {
+        slot.store(pack_rgb(*color), Ordering::Relaxed);
+    }
+    for (slot, color) in GLOW_COLORS.iter().zip(Palette::NEUTRAL_DARK.glow.iter()) {
         slot.store(pack_rgb(*color), Ordering::Relaxed);
     }
 }
@@ -98,14 +130,6 @@ fn accent_seed() -> Option<Rgba> {
     unpack_rgb(ACCENT_COLOR.load(Ordering::Relaxed))
 }
 
-fn ambient_seed() -> Option<Rgba> {
-    unpack_rgb(AMBIENT_COLOR.load(Ordering::Relaxed))
-}
-
-fn dominant_seed() -> Option<Rgba> {
-    unpack_rgb(DOMINANT_COLOR.load(Ordering::Relaxed))
-}
-
 fn with_alpha(mut color: Rgba, alpha: f32) -> Rgba {
     color.a = alpha;
     color
@@ -115,9 +139,58 @@ fn with_alpha(mut color: Rgba, alpha: f32) -> Rgba {
 // 结构色
 // ---------------------------------------------------------------------------
 
-/// 侧栏、播放栏的半透明磨砂底：叠在整页色场上，换封面时颜色连续。
+/// 侧栏底色：流光开启时保持细腻通透磨砂感，关闭时回到沉稳的静态底色。
 pub fn chrome() -> Rgba {
-    with_alpha(base(6), 0.62)
+    let flow = flow_mix();
+    let dark = super::motion::mix_rgba(
+        with_alpha(base(7), 0.84),
+        super::motion::mix_rgba(rgba(10, 11, 16, 0.44), with_alpha(base(7), 0.44), 0.25),
+        flow,
+    );
+    let light_static = light_surface(0xF1F3F6, 0.16);
+    let light_flow = with_alpha(light_surface(0xF6F7FA, 0.08), 0.66);
+    lerp_rgba(
+        dark,
+        super::motion::mix_rgba(light_static, light_flow, flow),
+    )
+}
+
+pub fn toolbar() -> Rgba {
+    let flow = flow_mix();
+    let dark = super::motion::mix_rgba(rgba(12, 13, 18, 0.72), rgba(8, 9, 13, 0.28), flow);
+    let light_static = light_surface(0xF7F8FA, 0.10);
+    let light_flow = with_alpha(light_surface(0xFAFBFD, 0.06), 0.58);
+    lerp_rgba(
+        dark,
+        super::motion::mix_rgba(light_static, light_flow, flow),
+    )
+}
+
+pub fn player_chrome() -> Rgba {
+    let flow = flow_mix();
+    let dark = super::motion::mix_rgba(
+        with_alpha(base(8), 0.88),
+        super::motion::mix_rgba(rgba(10, 11, 16, 0.56), with_alpha(base(8), 0.56), 0.25),
+        flow,
+    );
+    let light_static = light_surface(0xFAFBFD, 0.08);
+    let light_flow = with_alpha(light_surface(0xFCFDFE, 0.05), 0.72);
+    lerp_rgba(
+        dark,
+        super::motion::mix_rgba(light_static, light_flow, flow),
+    )
+}
+
+/// 设置分组卡片、提示容器等的磨砂表面，让全局流光自然透出同时保证文本清晰可读。
+pub fn card_surface() -> Rgba {
+    let flow = flow_mix();
+    let dark = super::motion::mix_rgba(with_alpha(base(7), 0.76), rgba(16, 18, 24, 0.48), flow);
+    let light_static = light_surface(0xFFFFFF, 0.04);
+    let light_flow = rgba(255, 255, 255, 0.66);
+    lerp_rgba(
+        dark,
+        super::motion::mix_rgba(light_static, light_flow, flow),
+    )
 }
 
 /// 9 阶主题色（0 = base-1，8 = base-9）。没有封面时返回深色中性板。
@@ -134,91 +207,236 @@ pub fn colorful() -> bool {
     ACCENT_COLORFUL.load(Ordering::Relaxed) != 0
 }
 
-/// 播放页/内容区背景：汽水同款 base-5 → base-7 纵向渐变。
+/// 取封面主色的通道差，染到浅色底上。扣掉中性色板自带的微弱蓝偏。
+fn light_surface(neutral: u32, strength: f32) -> Rgba {
+    let mut surface = hex(neutral);
+    let seed = base(2);
+    let peak = seed.r.max(seed.g).max(seed.b);
+    let tint = |channel: f32| (peak - channel - 4.0 / 255.0).clamp(0.0, 0.40) * strength;
+    surface.r -= tint(seed.r);
+    surface.g -= tint(seed.g);
+    surface.b -= tint(seed.b);
+    surface
+}
+
+/// 深色页以深邃曜石底衬托多色封面光斑（避免过亮发泥）；
+/// 关闭流光时保留温和的封面深阶渐变；浅色页保持明净微暖白。
 pub fn page_background() -> Background {
+    let flow = flow_mix();
+    let dark_flow_top = super::motion::mix_rgba(hex(0x0D0E14), base(7), 0.34);
+    let dark_flow_bottom = super::motion::mix_rgba(hex(0x08090D), base(8), 0.28);
+    let dark_static_top = super::motion::mix_rgba(hex(0x121319), base(5), 0.56);
+    let dark_static_bottom = super::motion::mix_rgba(hex(0x0B0C10), base(7), 0.50);
+    let dark_top = super::motion::mix_rgba(dark_static_top, dark_flow_top, flow);
+    let dark_bottom = super::motion::mix_rgba(dark_static_bottom, dark_flow_bottom, flow);
     linear_gradient(
         180.0,
-        linear_color_stop(base(4), 0.0),
-        linear_color_stop(base(6), 1.0),
+        linear_color_stop(lerp_rgba(dark_top, light_surface(0xF9FAFC, 0.14)), 0.0),
+        linear_color_stop(lerp_rgba(dark_bottom, light_surface(0xF3F5F9, 0.06)), 1.0),
     )
 }
 
-/// 进度条填充：汽水音乐深色页用 base-3；若 base-3 过暗（例如黑底+局部彩色主体封面
-/// 导致 base 阶梯退化为中性深灰），则回退到活力强调色 `accent()` 保证可读性。
+/// 进度条填充：深色页用 base-3（过暗时回退到 accent）；浅色页用 accent（过亮时压暗）。
 pub fn progress_fill() -> Rgba {
-    if colorful() {
-        let fill = base(2);
-        let luminance = 0.2126 * fill.r + 0.7152 * fill.g + 0.0722 * fill.b;
-        if luminance >= 0.28 {
-            return fill;
-        }
+    let fill = base(2);
+    let luminance = 0.2126 * fill.r + 0.7152 * fill.g + 0.0722 * fill.b;
+    if colorful() && luminance >= 0.28 {
+        lerp_rgba(fill, light_accent(accent_color()))
+    } else {
+        accent()
     }
-    accent()
 }
 
 /// 抬升面：搜索框、卡片、播放栏按钮。
 pub fn surface_elevated() -> Rgba {
-    rgba(255, 255, 255, 0.07)
+    lerp_rgba(rgba(255, 255, 255, 0.07), rgba(49, 66, 91, 0.055))
 }
 
 /// 行悬停。
 pub fn surface_hover() -> Rgba {
-    rgba(255, 255, 255, 0.09)
+    lerp_rgba(rgba(255, 255, 255, 0.09), rgba(49, 66, 91, 0.07))
 }
 
 /// 选中行。
 pub fn surface_selected() -> Rgba {
-    rgba(255, 255, 255, 0.13)
+    selection_tint(0.13)
+}
+
+/// 开关关闭态轨道底色：浅色/深色模式下与纯白滑块都有清晰区分度。
+pub fn switch_off_track() -> Rgba {
+    lerp_rgba(rgba(255, 255, 255, 0.16), rgba(15, 23, 42, 0.22))
+}
+
+pub fn selection_tint(alpha: f32) -> Rgba {
+    lerp_rgba(rgba(255, 255, 255, alpha), rgba(54, 76, 108, alpha * 0.75))
+}
+
+pub fn play_button() -> Background {
+    let dark = rgba(255, 255, 255, 0.085);
+    linear_gradient(
+        180.0,
+        linear_color_stop(lerp_rgba(dark, hex(0xFFFFFF)), 0.0),
+        linear_color_stop(lerp_rgba(dark, hex(0xF5F7FA)), 1.0),
+    )
+}
+
+pub fn play_button_border() -> Rgba {
+    lerp_rgba(rgba(255, 255, 255, 0.10), rgba(43, 70, 104, 0.15))
+}
+
+pub fn play_button_hover() -> Rgba {
+    lerp_rgba(rgba(255, 255, 255, 0.14), rgba(46, 70, 103, 0.08))
+}
+
+pub fn control_emphasis_text() -> Rgba {
+    lerp_rgba(hex(0xFFFFFF), hex(0x243448))
+}
+
+pub fn caption_hover() -> Rgba {
+    lerp_rgba(rgba(255, 255, 255, 0.06), rgba(46, 70, 103, 0.10))
+}
+
+pub fn playlist_action() -> Rgba {
+    lerp_rgba(rgba(255, 255, 255, 0.94), hex(0x1B2330))
+}
+
+pub fn playlist_action_hover() -> Rgba {
+    lerp_rgba(hex(0xFFFFFF), hex(0x283345))
+}
+
+pub fn playlist_action_text() -> Rgba {
+    lerp_rgba(hex(0x121212), hex(0xFFFFFF))
 }
 
 /// 1px 描边：只在需要分隔时用，颜色很轻。
 pub fn border() -> Rgba {
-    rgba(255, 255, 255, 0.08)
+    lerp_rgba(rgba(255, 255, 255, 0.08), rgba(51, 73, 101, 0.10))
 }
 
 /// 强一点的描边（浮层、菜单）。
 pub fn border_strong() -> Rgba {
-    rgba(255, 255, 255, 0.13)
+    lerp_rgba(rgba(255, 255, 255, 0.13), rgba(0, 0, 0, 0.13))
 }
 
 /// 玻璃面板上的高光边（顶部 1px），模仿亚克力的折射线。
 pub fn glass_highlight() -> Rgba {
-    rgba(255, 255, 255, 0.10)
+    lerp_rgba(rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.75))
 }
 
 /// 磨砂侧板/菜单的底色（半透明，配合 backdrop_blur 使用）。
 pub fn glass_panel() -> Rgba {
-    rgba(18, 18, 20, 0.72)
+    lerp_rgba(rgba(18, 18, 20, 0.72), rgba(250, 251, 253, 0.86))
 }
 
 /// 主文本。
 pub fn text() -> Rgba {
-    rgba(255, 255, 255, 0.94)
+    lerp_rgba(rgba(255, 255, 255, 0.94), rgba(18, 18, 22, 0.92))
 }
 
 /// 次要文本。
 pub fn text_muted() -> Rgba {
-    rgba(255, 255, 255, 0.63)
+    lerp_rgba(rgba(255, 255, 255, 0.63), hex(0x46515E))
 }
 
 /// 三级文本：序号、时长、占位符。
 pub fn text_faint() -> Rgba {
-    rgba(255, 255, 255, 0.38)
+    lerp_rgba(rgba(255, 255, 255, 0.38), hex(0x596372))
+}
+
+/// 当前行中尚未唱到的字。
+pub fn lyrics_pending() -> Rgba {
+    lerp_rgba(rgba(255, 255, 255, 0.56), rgba(22, 28, 38, 0.48))
+}
+
+/// 非当前歌词行的主文字颜色：比当前行未唱部分更柔和，保证「正在演唱」始终是视觉中心。
+pub fn lyrics_inactive() -> Rgba {
+    lerp_rgba(rgba(255, 255, 255, 0.40), rgba(22, 28, 38, 0.42))
+}
+
+/// 当前行中已唱到的字：使用封面活力色作为强调色，并在深/浅底色下分别做亮度约束，
+/// 保证在黑白或高饱和封面、深浅模式下都与未唱部分及背景有清晰区分度。
+pub fn lyrics_sung() -> Rgba {
+    let seed = accent_color();
+    lerp_rgba(dark_lyrics_accent(seed), light_lyrics_accent(seed))
+}
+
+fn relative_luminance(c: Rgba) -> f32 {
+    0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+}
+
+/// 深色底下的歌词高亮色：若封面主色过暗，向亮部提亮以保证清晰可读。
+fn dark_lyrics_accent(seed: Rgba) -> Rgba {
+    let lum = relative_luminance(seed);
+    if lum >= 0.48 {
+        return seed;
+    }
+    let lift = ((0.48 - lum) / (1.0 - lum).max(0.01)).clamp(0.0, 0.82);
+    Rgba {
+        r: seed.r + (1.0 - seed.r) * lift,
+        g: seed.g + (1.0 - seed.g) * lift,
+        b: seed.b + (1.0 - seed.b) * lift,
+        a: 1.0,
+    }
+}
+
+/// 浅色底下的歌词高亮色：若封面主色过亮（如亮黄/浅青），压暗以保证与浅底和未唱灰字的对比度。
+fn light_lyrics_accent(seed: Rgba) -> Rgba {
+    let lum = relative_luminance(seed);
+    let max_lum = 0.26;
+    let scale = if lum > max_lum {
+        (max_lum / lum).clamp(0.24, 0.72)
+    } else {
+        0.72
+    };
+    Rgba {
+        r: seed.r * scale,
+        g: seed.g * scale,
+        b: seed.b * scale,
+        a: 1.0,
+    }
 }
 
 /// 歌词译文（非当前行）：比正文更暗，只提供理解辅助。
 pub fn lyrics_translation() -> Rgba {
-    rgba(255, 255, 255, 0.36)
+    lerp_rgba(rgba(255, 255, 255, 0.34), rgba(18, 22, 30, 0.38))
 }
 
 /// 歌词译文（当前行）：跟随换行柔和变亮，但不追平英文正文。
 pub fn lyrics_translation_active() -> Rgba {
-    rgba(255, 255, 255, 0.70)
+    lerp_rgba(rgba(255, 255, 255, 0.76), rgba(18, 22, 30, 0.76))
 }
 
 /// 歌词译文（距离当前行较远）：继续压暗，避免整屏译文抢视线。
 pub fn lyrics_translation_faint() -> Rgba {
-    rgba(255, 255, 255, 0.28)
+    lerp_rgba(rgba(255, 255, 255, 0.24), rgba(18, 22, 30, 0.26))
+}
+
+/// 歌词行悬停背景（虚选中）：使用封面强调色轻染，并区分当前行与非当前行。
+pub fn lyrics_hover_bg(is_active: bool) -> Rgba {
+    let seed = accent_color();
+    let dark_tint = dark_lyrics_accent(seed);
+    // 浅色底保留封面色相鲜明度，只对高亮度浅黄等极亮色微压以免融入白底。
+    let seed_lum = relative_luminance(seed);
+    let light_tint = if seed_lum > 0.55 {
+        let k = (0.55 / seed_lum).clamp(0.65, 1.0);
+        Rgba {
+            r: seed.r * k,
+            g: seed.g * k,
+            b: seed.b * k,
+            a: 1.0,
+        }
+    } else {
+        seed
+    };
+    let dark = Rgba {
+        a: if is_active { 0.22 } else { 0.12 },
+        ..dark_tint
+    };
+    let light = Rgba {
+        a: if is_active { 0.16 } else { 0.095 },
+        ..light_tint
+    };
+    lerp_rgba(dark, light)
 }
 
 // ---------------------------------------------------------------------------
@@ -227,10 +445,59 @@ pub fn lyrics_translation_faint() -> Rgba {
 
 /// 强调色：有彩色封面时用封面活力色，否则用品牌绿。
 pub fn accent() -> Rgba {
-    if ACCENT_COLORFUL.load(Ordering::Relaxed) == 0 {
-        return hex(BRAND_GREEN);
+    let seed = accent_color();
+    lerp_rgba(seed, light_accent(seed))
+}
+
+/// 设置页选中项使用一组配对的文字和底色，随封面和主题切换保持可读。
+pub fn selected_choice() -> (Rgba, Rgba) {
+    let seed = accent_color();
+    let tint = super::motion::mix_rgba(hex(0xE8EEF6), light_accent(seed), 0.22);
+    let background = lerp_rgba(seed, tint);
+    (background, contrasting_text(background))
+}
+
+fn contrasting_text(background: Rgba) -> Rgba {
+    let linear = |channel: f32| {
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(background.r)
+        + 0.7152 * linear(background.g)
+        + 0.0722 * linear(background.b);
+    // 黑字和白字在这个相对亮度下具有相同的对比度。
+    if luminance >= 0.17913 {
+        hex(0x000000)
+    } else {
+        hex(0xFFFFFF)
     }
-    accent_seed().unwrap_or_else(|| hex(BRAND_GREEN))
+}
+
+fn accent_color() -> Rgba {
+    if colorful() {
+        accent_seed().unwrap_or_else(|| hex(BRAND_GREEN))
+    } else {
+        hex(BRAND_GREEN)
+    }
+}
+
+fn light_accent(seed: Rgba) -> Rgba {
+    let lum = relative_luminance(seed);
+    let max_lum = 0.34;
+    let scale = if lum > max_lum {
+        (max_lum / lum).clamp(0.25, 0.68)
+    } else {
+        0.68
+    };
+    Rgba {
+        r: seed.r * scale,
+        g: seed.g * scale,
+        b: seed.b * scale,
+        a: seed.a,
+    }
 }
 
 /// 警示色。
@@ -243,34 +510,50 @@ pub fn danger() -> Rgba {
     hex(0xFF6B70)
 }
 
-/// 封面主色的柔光：把最抢眼的颜色铺到右上角。
-pub fn backdrop_glow() -> Background {
-    let glow = accent_seed().unwrap_or_else(|| hex(BRAND_GREEN));
-    linear_gradient(
-        135.0,
-        linear_color_stop(with_alpha(glow, 0.20), 0.0),
-        linear_color_stop(with_alpha(glow, 0.0), 0.72),
-    )
+/// 4 组动态流光光斑颜色：有彩色封面时使用 OKLab 拉开色距的四簇封面色，
+/// 浅色模式转为明亮水彩粉彩且在黑白封面时保持明净冷白珠光，不再脏灰。
+pub fn backdrop_glow_colors() -> [Rgba; 4] {
+    let flow = flow_mix();
+    let is_colorful = colorful();
+    let light_neutral_orbs = [hex(0xD8E2F2), hex(0xE8DFF2), hex(0xD6EAE8), hex(0xE4E7F0)];
+    let dark_alphas = if is_colorful {
+        [0.54, 0.48, 0.42, 0.36]
+    } else {
+        [0.24, 0.20, 0.18, 0.14]
+    };
+    let light_alphas = if is_colorful {
+        [0.44, 0.40, 0.36, 0.30]
+    } else {
+        [0.26, 0.22, 0.20, 0.16]
+    };
+    std::array::from_fn(|index| {
+        let orb_rgb = unpack_rgb(GLOW_COLORS[index].load(Ordering::Relaxed)).unwrap_or_else(|| {
+            let [r, g, b] = Palette::NEUTRAL_DARK.glow[index];
+            rgba(r, g, b, 1.0)
+        });
+        let dark = with_alpha(orb_rgb, dark_alphas[index] * flow);
+        let light_base = if is_colorful {
+            super::motion::mix_rgba(orb_rgb, hex(0xFFFFFF), 0.34)
+        } else {
+            light_neutral_orbs[index]
+        };
+        let light = with_alpha(light_base, light_alphas[index] * flow);
+        lerp_rgba(dark, light)
+    })
 }
 
-/// 封面环境色的另一层柔光：左下角更沉，和强调色错开。
-pub fn backdrop_ambient_glow() -> Background {
-    let glow = ambient_seed()
-        .or_else(dominant_seed)
-        .unwrap_or_else(|| base(7));
-    linear_gradient(
-        315.0,
-        linear_color_stop(with_alpha(glow, 0.40), 0.0),
-        linear_color_stop(with_alpha(glow, 0.0), 0.66),
-    )
-}
-
-/// 色场之上的暗化渐变：上方轻、下方重，保证播放栏文字可读。
+/// 色场之上的暗化/柔化渐变：保证播放栏与边缘控件清晰可读。
 pub fn backdrop_scrim() -> Background {
     linear_gradient(
         180.0,
-        linear_color_stop(rgba(5, 5, 7, 0.04), 0.0),
-        linear_color_stop(rgba(4, 4, 6, 0.44), 1.0),
+        linear_color_stop(
+            lerp_rgba(rgba(6, 7, 10, 0.10), rgba(255, 255, 255, 0.04)),
+            0.0,
+        ),
+        linear_color_stop(
+            lerp_rgba(rgba(5, 6, 9, 0.34), rgba(255, 255, 255, 0.0)),
+            1.0,
+        ),
     )
 }
 
@@ -360,8 +643,15 @@ impl Text {
 mod tests {
     use super::*;
 
-    /// 主题色是进程级全局状态；这两个测试会互相覆盖，必须串行。
+    /// 主题色是进程级全局状态，修改它的测试必须串行。
     static THEME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn selected_text_uses_contrast_with_the_actual_fill() {
+        assert_eq!(contrasting_text(hex(0x375583)), hex(0xFFFFFF));
+        assert_eq!(contrasting_text(hex(0xCFDAEB)), hex(0x000000));
+        assert_eq!(contrasting_text(hex(BRAND_GREEN)), hex(0x000000));
+    }
 
     #[test]
     fn accent_falls_back_to_brand_green_without_cover() {
@@ -393,10 +683,69 @@ mod tests {
                 [34, 20, 19],
                 [22, 12, 12],
             ],
+            glow: Palette::NEUTRAL_DARK.glow,
             colorful: true,
         }));
         let accent = accent();
         assert!(accent.r > accent.g && accent.r > accent.b);
+        set_ambient_palette(None);
+    }
+
+    #[test]
+    fn light_surface_follows_dominant_color_and_falls_back_to_neutral() {
+        let _guard = THEME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let neutral = hex(0xFCFCFD);
+        let mut palette = Palette::NEUTRAL_DARK;
+        palette.colorful = true;
+        palette.accent = [201, 45, 75];
+        set_ambient_palette(Some(palette));
+        let gray_cover = light_surface(0xFCFCFD, 0.23);
+        palette.base[2] = [238, 124, 106];
+        set_ambient_palette(Some(palette));
+        let warm = light_surface(0xFCFCFD, 0.23);
+        palette.base[2] = [102, 149, 240];
+        set_ambient_palette(Some(palette));
+        let cool = light_surface(0xFCFCFD, 0.23);
+        set_ambient_palette(None);
+        assert_eq!(gray_cover, neutral);
+        assert!(warm.r > warm.b && warm.b > 0.88);
+        assert!(cool.b > cool.r && cool.r > 0.88);
+        assert_eq!(light_surface(0xFCFCFD, 0.23), neutral);
+    }
+
+    #[test]
+    fn lyrics_sung_keeps_readable_contrast_in_dark_and_light_modes() {
+        let _guard = THEME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut palette = Palette::NEUTRAL_DARK;
+        palette.colorful = true;
+        // 极暗封面色在深色模式下应提亮
+        palette.accent = [20, 30, 80];
+        set_ambient_palette(Some(palette));
+        set_light_mix(0.0);
+        let dark_lum = relative_luminance(lyrics_sung());
+        assert!(dark_lum >= 0.40, "dark sung luminance too low: {dark_lum}");
+
+        // 极亮封面色在浅色模式下应压暗
+        palette.accent = [250, 240, 120];
+        set_ambient_palette(Some(palette));
+        set_light_mix(1.0);
+        let light_lum = relative_luminance(lyrics_sung());
+        assert!(
+            light_lum <= 0.32,
+            "light sung luminance too high: {light_lum}"
+        );
+
+        // 当前行未唱词应与非当前行区分开，浅色下主强调色也不能过亮发灰
+        set_light_mix(1.0);
+        assert!(lyrics_pending().a > lyrics_inactive().a);
+        assert!(relative_luminance(accent()) <= 0.36);
+
+        set_light_mix(0.0);
+        assert!(lyrics_pending().a > lyrics_inactive().a);
         set_ambient_palette(None);
     }
 }

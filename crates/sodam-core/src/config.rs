@@ -54,6 +54,32 @@ pub struct Settings {
     /// 自动响度均衡是否开启。默认关闭。
     #[serde(default)]
     pub loudness_equalization: bool,
+    /// 浅色模式。默认关闭（深色模式）。
+    #[serde(default)]
+    pub light_mode: bool,
+    /// 动态流光背景。默认开启。
+    #[serde(default = "default_true")]
+    pub flowing_background: bool,
+    /// 全局应用流光（侧栏/顶栏/播放栏及歌单、设置页也透出流光；关闭后仅在歌词播放页展示）。
+    #[serde(default = "default_true")]
+    pub flowing_background_global: bool,
+    /// 歌词视图模糊（非当前行按距离渐隐柔化）。默认开启。
+    #[serde(default = "default_true")]
+    pub lyrics_blur: bool,
+    /// 歌词交错滚动效果。默认开启。
+    #[serde(default = "default_true")]
+    pub lyrics_staggered_scroll: bool,
+    /// 立体歌词效果（远行按距离渐缩与景深透视）。默认关闭。
+    #[serde(default)]
+    pub lyrics_3d_effect: bool,
+    /// 当前行改为按宽度连续扫色。默认按字或词点亮。
+    pub lyrics_continuous_sweep: bool,
+    /// 当前行字号，12–48。
+    #[serde(deserialize_with = "deserialize_lyrics_font_size")]
+    pub lyrics_font_size: u16,
+    /// 歌词字重，100–900，每 100 一档。
+    #[serde(deserialize_with = "deserialize_lyrics_font_weight")]
+    pub lyrics_font_weight: u16,
     /// 旧版本的上次播放记录（`local:绝对路径`）与进度（毫秒）；空串 = 没有。
     ///
     /// 完整会话现在由 `session` 模块的 `session.json` / `checkpoint.json` 保存；
@@ -67,6 +93,55 @@ pub struct Settings {
 
 fn default_true() -> bool {
     true
+}
+
+pub const LYRICS_FONT_SIZE: std::ops::RangeInclusive<u16> = 12..=48;
+pub const LYRICS_FONT_WEIGHT: std::ops::RangeInclusive<u16> = 100..=900;
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LyricFontSetting {
+    Number(i64),
+    Legacy(String),
+}
+
+impl LyricFontSetting {
+    fn number(self, legacy: &[(&str, i64)], default: i64) -> i64 {
+        match self {
+            Self::Number(number) => number,
+            Self::Legacy(value) => {
+                let value = value.trim();
+                value.parse().unwrap_or_else(|_| {
+                    legacy
+                        .iter()
+                        .find(|(tag, _)| value.eq_ignore_ascii_case(tag))
+                        .map_or(default, |(_, number)| *number)
+                })
+            }
+        }
+    }
+}
+
+fn deserialize_lyrics_font_size<'de, D: serde::Deserializer<'de>>(
+    value: D,
+) -> Result<u16, D::Error> {
+    let size = LyricFontSetting::deserialize(value)?.number(&[("small", 23), ("large", 30)], 26);
+    Ok(size.clamp(
+        i64::from(*LYRICS_FONT_SIZE.start()),
+        i64::from(*LYRICS_FONT_SIZE.end()),
+    ) as u16)
+}
+
+fn deserialize_lyrics_font_weight<'de, D: serde::Deserializer<'de>>(
+    value: D,
+) -> Result<u16, D::Error> {
+    let weight = LyricFontSetting::deserialize(value)?
+        .number(&[("normal", 400), ("medium", 500), ("bold", 700)], 600)
+        .clamp(
+            i64::from(*LYRICS_FONT_WEIGHT.start()),
+            i64::from(*LYRICS_FONT_WEIGHT.end()),
+        );
+    Ok(((weight + 50) / 100 * 100) as u16)
 }
 
 /// 播放控制快捷键的内置默认值。
@@ -245,6 +320,15 @@ impl Default for Settings {
             lyrics_translation: true,
             taskbar_player: false,
             loudness_equalization: false,
+            light_mode: false,
+            flowing_background: true,
+            flowing_background_global: true,
+            lyrics_blur: true,
+            lyrics_staggered_scroll: true,
+            lyrics_3d_effect: false,
+            lyrics_continuous_sweep: false,
+            lyrics_font_size: 26,
+            lyrics_font_weight: 600,
             last_track_id: String::new(),
             last_position_ms: 0,
         }
@@ -304,7 +388,8 @@ impl Settings {
             Err(error) => return Err(error.into()),
         };
         // 只导入当前支持的字段，旧版账号等字段不会跟着复制。
-        let (mut settings, _) = serde_json::from_str::<Self>(&text)?.migrated();
+        let (mut settings, _) =
+            serde_json::from_str::<Self>(text.trim_start_matches('\u{feff}'))?.migrated();
         settings.normalize_playback();
         let parent = target
             .parent()
@@ -336,7 +421,7 @@ impl Settings {
                 return Self::default();
             }
         };
-        let settings = match serde_json::from_str::<Self>(&text) {
+        let settings = match serde_json::from_str::<Self>(text.trim_start_matches('\u{feff}')) {
             Ok(settings) => settings,
             Err(error) => {
                 let detail = error.to_string();
@@ -652,4 +737,46 @@ mod tests {
         assert_eq!(loaded.last_position_ms, 42_500);
         assert!(loaded.language.is_empty());
     }
+}
+#[test]
+fn settings_load_handles_utf8_bom_and_flowing_global_default() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        "\u{feff}{\"language\":\"en\",\"flowing_background\":true}",
+    )
+    .expect("write");
+    let loaded = Settings::load_from(&path);
+    assert_eq!(loaded.language, "en");
+    assert!(loaded.flowing_background);
+    assert!(loaded.flowing_background_global);
+}
+
+#[test]
+fn lyrics_typography_accepts_old_presets_and_numeric_steps() {
+    let legacy: Settings =
+        serde_json::from_str(r#"{"lyrics_font_size":"large","lyrics_font_weight":"bold"}"#)
+            .unwrap();
+    assert_eq!(
+        (legacy.lyrics_font_size, legacy.lyrics_font_weight),
+        (30, 700)
+    );
+    let numeric: Settings =
+        serde_json::from_str(r#"{"lyrics_font_size":29,"lyrics_font_weight":650}"#).unwrap();
+    assert_eq!(
+        (numeric.lyrics_font_size, numeric.lyrics_font_weight),
+        (29, 700)
+    );
+    let bounded: Settings =
+        serde_json::from_str(r#"{"lyrics_font_size":100,"lyrics_font_weight":-30}"#).unwrap();
+    assert_eq!(
+        (bounded.lyrics_font_size, bounded.lyrics_font_weight),
+        (48, 100)
+    );
+    let default: Settings = serde_json::from_str("{}").unwrap();
+    assert_eq!(
+        (default.lyrics_font_size, default.lyrics_font_weight),
+        (26, 600)
+    );
 }

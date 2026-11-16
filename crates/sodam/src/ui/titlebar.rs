@@ -168,7 +168,12 @@ fn caption_button(
     fade: HoverFade,
     cx: &mut Context<Root>,
 ) -> impl IntoElement {
-    // 图标颜色 120ms 从 94% 白过渡到纯白；底色由 hover 层淡入。
+    let resting_text = theme::text();
+    let hover_text = if danger {
+        theme::hex(0xFFFFFF)
+    } else {
+        theme::control_emphasis_text()
+    };
     let base = div()
         .id(id)
         .relative()
@@ -183,20 +188,9 @@ fn caption_button(
             fade,
             0.0,
             if danger {
-                // #c42b1c
-                gpui::Rgba {
-                    r: 0.769,
-                    g: 0.169,
-                    b: 0.11,
-                    a: 1.0,
-                }
+                theme::hex(0xC42B1C)
             } else {
-                gpui::Rgba {
-                    r: 1.0,
-                    g: 1.0,
-                    b: 1.0,
-                    a: 0.06,
-                }
+                theme::caption_hover()
             },
         ))
         .on_hover(Root::hover_listener(cx, id))
@@ -205,17 +199,16 @@ fn caption_button(
                 .path(icons::path(icon))
                 .size(px(GLYPH_SIZE))
                 .text_color(if fade.hovered {
-                    gpui::white()
+                    hover_text
                 } else {
-                    theme::text().into()
+                    resting_text
                 })
                 .into_any_element()
         } else {
-            let white: gpui::Rgba = gpui::white().into();
             let (from, to) = if fade.hovered {
-                (theme::text(), white)
+                (resting_text, hover_text)
             } else {
-                (white, theme::text())
+                (hover_text, resting_text)
             };
             svg()
                 .path(icons::path(icon))

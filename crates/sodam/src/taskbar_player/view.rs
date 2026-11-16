@@ -255,11 +255,15 @@ impl Render for TaskbarPlayerView {
 
         let playing = self.snapshot.playing;
         let has_track = !self.snapshot.track_id.is_empty();
+        let light_bar = matches!(
+            window.appearance(),
+            gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight
+        );
         // 首次定位前窗口是全透明的：这期间不要接收点击，
         // 否则用户点任务栏空白处可能误触一个看不见的播控。
         let interactive = has_track && self.visible;
-        let cover = self.cover_layers();
-        let line = self.line_layer(window);
+        let cover = self.cover_layers(light_bar);
+        let line = self.line_layer(window, light_bar);
 
         let controls = div()
             .flex()
@@ -272,6 +276,7 @@ impl Render for TaskbarPlayerView {
                 "taskbar-prev",
                 "skip-back",
                 !interactive,
+                light_bar,
                 cx,
                 |root, cx| root.prev_track(cx),
             ))
@@ -280,6 +285,7 @@ impl Render for TaskbarPlayerView {
                 "taskbar-toggle",
                 if playing { "pause" } else { "play" },
                 !interactive,
+                light_bar,
                 cx,
                 |root, cx| root.toggle_play(cx),
             ))
@@ -288,6 +294,7 @@ impl Render for TaskbarPlayerView {
                 "taskbar-next",
                 "skip-forward",
                 !interactive,
+                light_bar,
                 cx,
                 |root, cx| root.next_track(cx),
             ));
@@ -345,18 +352,28 @@ impl Render for TaskbarPlayerView {
 }
 
 impl TaskbarPlayerView {
-    fn cover_layers(&self) -> Vec<AnyElement> {
+    fn cover_layers(&self, light_bar: bool) -> Vec<AnyElement> {
+        let placeholder_bg = if light_bar {
+            theme::rgba(0, 0, 0, 0.06)
+        } else {
+            theme::rgba(255, 255, 255, 0.08)
+        };
+        let placeholder_fg = if light_bar {
+            theme::rgba(18, 18, 22, 0.42)
+        } else {
+            theme::rgba(255, 255, 255, 0.40)
+        };
         let placeholder = div()
             .size_full()
             .flex()
             .items_center()
             .justify_center()
-            .bg(theme::surface_elevated())
+            .bg(placeholder_bg)
             .child(
                 svg()
                     .path(icons::path("music"))
                     .size(px(14.0))
-                    .text_color(theme::text_faint()),
+                    .text_color(placeholder_fg),
             )
             .into_any_element();
         motion::cover_layers(
@@ -368,7 +385,7 @@ impl TaskbarPlayerView {
         )
     }
 
-    fn line_layer(&self, window: &Window) -> AnyElement {
+    fn line_layer(&self, window: &Window, light_bar: bool) -> AnyElement {
         let fresh = line_element(
             window,
             &self.snapshot.line,
@@ -376,6 +393,7 @@ impl TaskbarPlayerView {
             self.snapshot.wipe,
             self.text_width,
             self.scroll,
+            light_bar,
         );
         let animating = self
             .line_changed_at
@@ -390,6 +408,7 @@ impl TaskbarPlayerView {
                     1.0,
                     previous.width,
                     previous.scroll,
+                    light_bar,
                 );
                 motion::crossfade_text(
                     "taskbar-line",
@@ -404,19 +423,27 @@ impl TaskbarPlayerView {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn button(
         &self,
         slot: usize,
         id: &'static str,
         icon: &'static str,
         disabled: bool,
+        light_bar: bool,
         cx: &mut Context<Self>,
         action: impl Fn(&mut Root, &mut Context<Root>) + 'static,
     ) -> AnyElement {
-        let color = if disabled {
-            theme::text_faint()
+        let color = match (disabled, light_bar) {
+            (true, true) => theme::rgba(18, 18, 22, 0.35),
+            (true, false) => theme::rgba(255, 255, 255, 0.38),
+            (false, true) => theme::rgba(18, 18, 22, 0.72),
+            (false, false) => theme::rgba(255, 255, 255, 0.72),
+        };
+        let hover_bg = if light_bar {
+            theme::rgba(0, 0, 0, 0.08)
         } else {
-            theme::text_muted()
+            theme::rgba(255, 255, 255, 0.12)
         };
         let mut button = div()
             .id(id)
@@ -430,12 +457,7 @@ impl TaskbarPlayerView {
         if !disabled {
             button = button
                 .cursor_pointer()
-                .child(motion::hover_layer(
-                    id,
-                    self.hover[slot],
-                    6.0,
-                    theme::rgba(255, 255, 255, 0.10),
-                ))
+                .child(motion::hover_layer(id, self.hover[slot], 6.0, hover_bg))
                 .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
                     let fade = &mut this.hover[slot];
                     if fade.hovered != *hovered {
@@ -472,7 +494,18 @@ fn line_element(
     wipe: f32,
     width: f32,
     scroll: f32,
+    light_bar: bool,
 ) -> AnyElement {
+    let fg_primary = if light_bar {
+        theme::rgba(18, 18, 22, 0.92)
+    } else {
+        theme::rgba(255, 255, 255, 0.94)
+    };
+    let fg_muted = if light_bar {
+        theme::rgba(18, 18, 22, 0.56)
+    } else {
+        theme::rgba(255, 255, 255, 0.62)
+    };
     if !playing {
         return div()
             .relative()
@@ -488,7 +521,7 @@ fn line_element(
                     .text_size(px(LYRIC_SIZE))
                     .line_height(px(LINE_H))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme::text())
+                    .text_color(fg_primary)
                     .child(text.to_string()),
             )
             .into_any_element();
@@ -528,7 +561,7 @@ fn line_element(
         row = row.child(
             div()
                 .flex_none()
-                .text_color(motion::mix_rgba(theme::text_muted(), theme::text(), eased))
+                .text_color(motion::mix_rgba(fg_muted, fg_primary, eased))
                 .child(token.text),
         );
     }

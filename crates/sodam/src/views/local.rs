@@ -352,9 +352,9 @@ pub(crate) fn local_view(root: &mut Root, cx: &mut Context<Root>) -> AnyElement 
                         .h(px(theme::size::CONTROL_LG))
                         .px(px(theme::space::XL))
                         .rounded(px(theme::radius::PILL))
-                        .bg(gpui::rgba(0xFFFFFFEF))
+                        .bg(theme::playlist_action())
                         .cursor_pointer()
-                        .hover(|style| style.bg(gpui::white()))
+                        .hover(|style| style.bg(theme::playlist_action_hover()))
                         // 按下时整颗胶囊轻微缩小，松开回弹；只作用于绘制层，不改变布局。
                         .active(|style| style.layer_scale(0.97))
                         .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
@@ -364,13 +364,13 @@ pub(crate) fn local_view(root: &mut Root, cx: &mut Context<Root>) -> AnyElement 
                             svg()
                                 .path(icons::path("play"))
                                 .size(px(theme::ICON))
-                                .text_color(theme::hex(0x121212)),
+                                .text_color(theme::playlist_action_text()),
                         )
                         .child(
                             div()
                                 .text_size(theme::Text::Body.size())
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme::hex(0x121212))
+                                .text_color(theme::playlist_action_text())
                                 .child(root.tr("播放全部")),
                         ),
                 );
@@ -809,12 +809,12 @@ fn empty_library_state(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 .h(px(theme::size::CONTROL_LG))
                 .px(px(theme::space::XXL))
                 .rounded(px(theme::radius::PILL))
-                .bg(gpui::rgba(0xFFFFFFEF))
+                .bg(theme::playlist_action())
                 .cursor_pointer()
-                .hover(|style| style.bg(gpui::white()))
+                .hover(|style| style.bg(theme::playlist_action_hover()))
                 .text_size(theme::Text::Body.size())
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::hex(0x121212))
+                .text_color(theme::playlist_action_text())
                 .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
                     root.pick_local_folder(cx);
                 }))
