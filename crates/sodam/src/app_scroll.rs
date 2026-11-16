@@ -106,9 +106,6 @@ impl Root {
         });
         slot.anim.wheel(applied, delta, max);
         smooth_scroll::apply(&slot.handle, slot.anim.current());
-        if slot.anim.is_running() {
-            window.request_animation_frame();
-        }
         if key == "settings-scroll" {
             self.settings_scroll_lock_until = None;
             self.sync_settings_section();
@@ -209,7 +206,7 @@ impl Root {
     pub(crate) fn scroll_settings_to(
         &mut self,
         section_index: usize,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.settings_active_section = section_index;
@@ -233,7 +230,6 @@ impl Root {
                 slot.anim
                     .animate_to_soft(smooth_scroll::read(&handle), target, max);
                 smooth_scroll::apply(&slot.handle, slot.anim.current());
-                window.request_animation_frame();
             }
         }
         cx.notify();
