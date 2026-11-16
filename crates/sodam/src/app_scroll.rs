@@ -106,6 +106,9 @@ impl Root {
         });
         slot.anim.wheel(applied, delta, max);
         smooth_scroll::apply(&slot.handle, slot.anim.current());
+        if slot.anim.is_running() {
+            window.request_animation_frame();
+        }
         if key == "settings-scroll" {
             self.settings_scroll_lock_until = None;
             self.sync_settings_section();
@@ -152,15 +155,26 @@ impl Root {
             .is_some_and(|slot| slot.anim.is_running());
         let line_changed = self.lyrics_scroll_line != Some(index);
         let start = smooth_scroll::read(&handle);
-        let needs_nudge = (start - target).abs() > 0.5;
+        let needs_nudge = (start - target).abs() > 0.9;
         if !line_changed && (running || !needs_nudge) {
             return;
         }
         self.lyrics_scroll_line = Some(index);
         let now = Instant::now();
+        let delta = target - start;
+        let slot = self
+            .scroll_anims
+            .entry("lyrics-scroll")
+            .or_insert_with(|| ScrollSlot {
+                anim: Default::default(),
+                handle: handle.clone(),
+            });
+        slot.anim.animate_to_lyric(start, target, max);
+        smooth_scroll::apply(&slot.handle, slot.anim.current());
+
         let adjacent = self
             .lyrics_prev_active
-            .is_some_and(|prev| (1..=4).contains(&index.saturating_sub(prev)));
+            .is_some_and(|prev| (1..=4).contains(&index.abs_diff(prev)));
         let normal_interval = self.lyrics.as_ref().is_some_and(|lyrics| {
             let at = lyrics.lines.get(index).and_then(|line| line.at_ms);
             let previous = index
@@ -171,10 +185,11 @@ impl Root {
             [previous.zip(at), at.zip(next)]
                 .into_iter()
                 .flatten()
-                .all(|(start, end)| end.saturating_sub(start) >= 420)
+                .all(|(start, end)| end.saturating_sub(start) >= 320)
         });
         self.lyrics_scroll_stagger = (line_changed
             && needs_nudge
+            && delta.abs() >= 4.0
             && self.settings.lyrics_staggered_scroll
             && adjacent
             && normal_interval
@@ -184,16 +199,8 @@ impl Root {
             && !self
                 .lyrics_last_seek
                 .is_some_and(|at| now.duration_since(at) < Duration::from_millis(400)))
-        .then_some((now, start));
-        let slot = self
-            .scroll_anims
-            .entry("lyrics-scroll")
-            .or_insert_with(|| ScrollSlot {
-                anim: Default::default(),
-                handle: handle.clone(),
-            });
-        slot.anim.animate_to_soft(start, target, max);
-        smooth_scroll::apply(&slot.handle, slot.anim.current());
+        .then_some((now, delta));
+
         window.request_animation_frame();
         cx.notify();
     }

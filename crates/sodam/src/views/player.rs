@@ -10,7 +10,10 @@
 use std::ops::Range;
 
 use gpui::prelude::*;
-use gpui::{div, px, svg, AnimationExt, AnyElement, App, Context, IntoElement, Window};
+use gpui::{
+    div, px, svg, AnimationExt, AnyElement, App, Bounds, Context, Element, ElementId,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Window,
+};
 
 use crate::app::{line_progress, lyric_tokens, LyricToken, Root};
 use crate::ui::{icons, motion, theme};
@@ -254,6 +257,67 @@ struct LyricTextLine {
     tokens: Vec<LyricToken>,
 }
 
+/// 歌词移动较慢，设备像素取整会让列表在减速时一格一格跳。
+struct FractionalLyrics(AnyElement);
+
+impl IntoElement for FractionalLyrics {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for FractionalLyrics {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.0.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.with_pixel_snapping(false, |window| {
+            self.0.prepaint(window, cx);
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.0.paint(window, cx);
+    }
+}
+
 /// 一行歌词的预计算排版。
 struct LyricsRow {
     /// 主歌词按平衡断句拆成若干行，保留整行整形宽度用于扫色。
@@ -473,6 +537,7 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
     let synced = lyrics.synced;
     let active = root.lyrics_active;
     let prev_active = root.lyrics_prev_active;
+    let prev_growth = root.lyrics_prev_growth;
     let anim_seq = root.lyrics_anim_seq;
     let translation_t = root
         .lyrics_switch_at
@@ -482,6 +547,10 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
         .lyrics_switch_at
         .map(|at| motion::progress(at, motion::duration::LYRIC_OUT))
         .unwrap_or(1.0);
+    let in_growth = root.lyrics_switch_at.map_or(1.0, |at| {
+        gpui::ease_out_quint()(motion::progress(at, motion::duration::LYRIC))
+    });
+    let out_growth = prev_growth * (1.0 - gpui::ease_out_quint()(out_t));
     // 旧行只在换行后的退场窗口里保留「已唱完」样式；超时后切回普通样式，
     // 否则上一行会一直保持白色加粗，和上下文的层级对不上。
     let switch_recent = root
@@ -500,12 +569,7 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
     let stagger = lyrics_staggered
         .then_some(root.lyrics_scroll_stagger)
         .flatten()
-        .map(|(at, start)| {
-            (
-                now.saturating_duration_since(at).as_secs_f32(),
-                scroll_top - start,
-            )
-        });
+        .map(|(at, delta)| (now.saturating_duration_since(at).as_secs_f32(), delta));
 
     // 上下留白让首行/末行也能滚到正中。用滚动句柄的实际视口高度；
     // 第一帧还没布局时用窗口高度减去顶栏和播放栏估算。
@@ -525,6 +589,13 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
         .map(|(index, row)| {
             let is_active = synced && active == Some(index);
             let was_active = synced && prev_active == Some(index) && switch_recent;
+            let active_weight = if is_active {
+                in_growth
+            } else if was_active {
+                out_growth
+            } else {
+                0.0
+            };
             let distance = active.map(|active| active.abs_diff(index));
             let depth = distance.unwrap_or(0).min(5) as f32;
             let previous_depth =
@@ -533,15 +604,13 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
                 previous_depth + (depth - previous_depth) * motion::ease_in_out_cubic(out_t);
             let row_top = pad + row.offset - scroll_top;
             let visible = row_top + row.height > 0.0 && row_top < viewport_h;
+            // 提前处理视口边缘的行，避免刚进入淡出区域就切换文字光栅。
+            let near_view = row_top + row.height > -row.height && row_top < viewport_h + row.height;
             let shift = match (stagger, active, distance) {
-                (Some((elapsed, scroll_delta)), Some(active), Some(distance @ 1..=6)) => {
-                    let lag = if index > active { 1.0 } else { 0.65 };
-                    let max_shift = row.height * 0.38;
-                    stagger_offset(
-                        elapsed,
-                        scroll_delta.clamp(-max_shift, max_shift) * lag,
-                        distance,
-                    )
+                (Some((elapsed, delta)), Some(active), Some(distance @ 1..=6)) => {
+                    let max_shift = row.height * 0.72;
+                    stagger_offset(elapsed, delta, index > active, distance)
+                        .clamp(-max_shift, max_shift)
                 }
                 _ => 0.0,
             };
@@ -578,48 +647,26 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
                 english_plain(&row.english, inactive_color, typo.english_line_h())
             };
 
-            // 主歌词单独包在固定高度的区域里：高亮只缩放文字本身，
-            // 译文留在缩放层之外，不会在换行后退场时突然变大。
+            // 视口附近始终使用同一字号排版，避免缩放结束后换到另一套字宽和基线。
+            let base_scale = typo.base_size() / typo.active_size();
+            let same_raster = is_active || was_active || near_view;
             let main = div()
                 .w_full()
                 .h(px(row.english_h))
                 .flex()
                 .flex_col()
                 .justify_center()
-                .text_size(px(if is_active || was_active {
+                .text_size(px(if same_raster {
                     typo.active_size()
                 } else {
                     typo.base_size()
                 }))
                 .font_weight(typo.weight())
-                .child(english);
-            let main = if is_active {
-                // 字号切换用图层缩放而不是逐帧改 font-size：文字只按高亮字号
-                // 光栅化一次，之后由 GPU 连续缩放，换行时不会因为重新排字卡一下。
-                let scale_from = typo.base_size() / typo.active_size();
-                main.with_animation(
-                    gpui::ElementId::Name(format!("lyric-grow-{anim_seq}-{index}").into()),
-                    motion::standard(motion::duration::LYRIC),
-                    move |this, delta| {
-                        this.layer_scale_origin(gpui::point(0.0, 0.5))
-                            .layer_scale(scale_from + (1.0 - scale_from) * delta)
-                    },
-                )
-                .into_any_element()
-            } else if was_active {
-                let scale_to = typo.base_size() / typo.active_size();
-                main.with_animation(
-                    gpui::ElementId::Name(format!("lyric-shrink-{anim_seq}-{index}").into()),
-                    motion::standard(motion::duration::LYRIC_OUT),
-                    move |this, delta| {
-                        this.layer_scale_origin(gpui::point(0.0, 0.5))
-                            .layer_scale(1.0 + (scale_to - 1.0) * delta)
-                    },
-                )
-                .into_any_element()
-            } else {
-                main.into_any_element()
-            };
+                .child(english)
+                .when(same_raster, |this| {
+                    this.layer_scale_origin(gpui::point(0.0, 0.5))
+                        .layer_scale(base_scale + (1.0 - base_scale) * active_weight)
+                });
 
             // 译文固定占英文块下方：始终保留占位，开关只改透明度和 4px 位移，
             // 英文位置与整块滚动都不动。
@@ -699,16 +746,16 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
                 let blur_px = ((depth - 0.35).max(0.0) * 1.05 + 0.35).min(4.2);
                 content = content.blur(px(blur_px));
             }
-            let (effective_scale, effective_inset) = if lyrics_3d && visible {
+            let (effective_scale, effective_inset) = if lyrics_3d && near_view {
                 (scale, inset)
             } else {
                 (1.0, 0.0)
             };
-            let content = if lyrics_3d && visible {
+            let content = if lyrics_3d && near_view {
                 content
-                    .pl(px(inset))
                     .layer_scale_origin(gpui::point(0.0, 0.5))
                     .layer_scale(scale)
+                    .layer_translate(gpui::point(px(inset * scale), px(0.0)))
             } else {
                 content
             };
@@ -734,13 +781,6 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
                 content.opacity(fade).into_any_element()
             };
 
-            let active_weight = if is_active {
-                1.0
-            } else if was_active {
-                1.0 - motion::ease_in_out_cubic(out_t)
-            } else {
-                0.0
-            };
             let content_h = (row.height - LYRIC_ROW_PAD * 2.0).max(1.0);
             let hover_frame = lyric_hover_frame(
                 panel_w,
@@ -840,15 +880,16 @@ fn lyrics_panel(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> Any
             .min_h(px(0.0))
             .w_full()
             .fade_edges(px(48.0), px(64.0))
-            .child(
+            .child(FractionalLyrics(
                 div()
                     .w_full()
                     .flex()
                     .flex_col()
                     .pt(px(pad))
                     .pb(px(pad))
-                    .children(rows),
-            ),
+                    .children(rows)
+                    .into_any_element(),
+            )),
     );
     panel
         // 换歌（歌词重新加载）时整块淡入，避免上一首的歌词瞬间换成下一首。
@@ -897,58 +938,54 @@ fn english_plain(lines: &[LyricTextLine], color: gpui::Rgba, line_h: f32) -> Any
     block.into_any_element()
 }
 
+/// 原版 v1.0.1 逐字/逐词高亮：每个 token 独立排版横排，按权重用 smoothstep 从待唱色平滑点亮到已唱色；
+/// 与「连续扫色」模式完全分开。
 fn english_word_highlight(
     lines: &[LyricTextLine],
-    progress: f32,
+    wipe: f32,
     pending_color: gpui::Rgba,
     sung_color: gpui::Rgba,
     line_h: f32,
 ) -> AnyElement {
-    let total = lines
+    let total: f32 = lines
         .iter()
-        .flat_map(|line| &line.tokens)
+        .flat_map(|line| line.tokens.iter())
         .map(|token| token.weight)
-        .sum::<f32>();
-    let mut remaining = total * progress;
-    let highlight = gpui::HighlightStyle {
-        color: Some(sung_color.into()),
-        ..Default::default()
-    };
+        .sum::<f32>()
+        .max(1.0);
+    let mut cumulative = 0.0;
     let mut block = div().w_full().flex().flex_col();
     for line in lines {
-        let sung = sung_prefix_bytes(&line.tokens, &mut remaining);
-        let text = gpui::StyledText::new(line.text.clone())
-            .with_highlights((sung > 0).then_some((0..sung, highlight)));
-        block = block.child(
-            div()
-                .w_full()
-                .h(px(line_h))
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .child(
-                    div()
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .text_color(pending_color)
-                        .child(text),
-                ),
-        );
+        let mut row = div()
+            .w_full()
+            .h(px(line_h))
+            .flex()
+            .flex_row()
+            .items_center()
+            .overflow_hidden();
+        for token in &line.tokens {
+            let eased = token_wipe_progress(wipe, cumulative, token.weight, total);
+            cumulative += token.weight;
+            row = row.child(
+                div()
+                    .flex_none()
+                    .text_color(motion::mix_rgba(pending_color, sung_color, eased))
+                    .child(token.text.clone()),
+            );
+        }
+        block = block.child(row);
     }
     block.into_any_element()
 }
 
-fn sung_prefix_bytes(tokens: &[LyricToken], remaining: &mut f32) -> usize {
-    let mut bytes = 0;
-    for token in tokens {
-        if *remaining < token.weight * 0.5 {
-            *remaining = 0.0;
-            break;
-        }
-        *remaining -= token.weight;
-        bytes += token.text.len();
-    }
-    bytes
+fn token_wipe_progress(wipe: f32, cumulative: f32, weight: f32, total: f32) -> f32 {
+    let total = total.max(1.0);
+    let start = cumulative / total;
+    let end_fraction = (cumulative + weight) / total;
+    let span = (end_fraction - start).max(1e-6);
+    let raw = ((wipe - start) / span).clamp(0.0, 1.0);
+    // smoothstep：字的亮度在进入/离开时都有一段柔和的过渡。
+    raw * raw * (3.0 - 2.0 * raw)
 }
 
 /// LRC 只有行时间戳。用整形后的宽度推进扫色，保留字距和连字。
@@ -982,6 +1019,7 @@ fn english_wipe(
             .overflow_hidden()
             .child(text(if complete { sung_color } else { pending_color }));
         if !complete && sung_width > 0.0 {
+            let feather = sung_width.min(line.width - sung_width).min(14.0);
             row = row.child(
                 div()
                     .absolute()
@@ -992,7 +1030,7 @@ fn english_wipe(
                     .flex()
                     .items_center()
                     .overflow_hidden()
-                    .fade_sides(px(0.0), px((line.width - sung_width).min(5.0)))
+                    .fade_sides(px(0.0), px(feather))
                     .child(text(sung_color)),
             );
         }
@@ -1001,11 +1039,28 @@ fn english_wipe(
     block.into_any_element()
 }
 
-/// 用列表的真实滚动量补偿尚未开始移动的行，随后逐行归位。
-fn stagger_offset(elapsed: f32, scroll_delta: f32, distance: usize) -> f32 {
-    let delay = 0.095 * (1.0 - 0.75_f32.powi(distance as i32));
-    let t = ((elapsed - delay) / 0.30).clamp(0.0, 1.0);
-    scroll_delta * (1.0 - t * t * (3.0 - 2.0 * t))
+/// 使用与歌词软弹簧（k=70, ω≈8.37）同频的临界阻尼级联偏移，保持柔和弹性同时在末尾干净落稳。
+fn stagger_offset(elapsed: f32, scroll_delta: f32, is_below: bool, distance: usize) -> f32 {
+    const OMEGA: f32 = 8.37;
+    const STEP_BELOW: f32 = 0.044;
+    const STEP_ABOVE: f32 = 0.022;
+    const MAX_DELAY: f32 = 0.22;
+    if scroll_delta == 0.0 || distance == 0 || elapsed <= 0.0 {
+        return 0.0;
+    }
+    let delay_step = if is_below { STEP_BELOW } else { STEP_ABOVE };
+    let delay = (delay_step * distance.min(6) as f32).min(MAX_DELAY);
+    let lag_scale = if is_below { 1.0 } else { 0.58 };
+    let spring_progress = |t: f32| -> f32 {
+        if t <= 0.0 {
+            0.0
+        } else {
+            1.0 - (1.0 + OMEGA * t) * (-OMEGA * t).exp()
+        }
+    };
+    let tail_fade = 1.0 - ((elapsed - 0.68) / 0.16).clamp(0.0, 1.0);
+    let diff = (spring_progress(elapsed) - spring_progress(elapsed - delay)) * tail_fade;
+    scroll_delta * diff * lag_scale
 }
 
 /// 非当前行相对当前行的悬停底框宽度比例（不开立体时与 0.77 字号比例匹配）。
@@ -1274,19 +1329,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn discrete_highlights_only_cover_complete_characters_and_words() {
+    fn word_highlights_match_original_smoothstep_per_token() {
         let tokens = lyric_tokens("远方 hello");
-        assert_eq!(sung_prefix_bytes(&tokens, &mut 0.0), 0);
-        assert_eq!(sung_prefix_bytes(&tokens, &mut 0.5), "远".len());
-        assert_eq!(sung_prefix_bytes(&tokens, &mut 3.0), "远方 ".len());
-        assert_eq!(sung_prefix_bytes(&tokens, &mut 4.5), "远方 hello".len());
+        let total: f32 = tokens.iter().map(|t| t.weight).sum();
+
+        assert_eq!(token_wipe_progress(0.0, 0.0, tokens[0].weight, total), 0.0);
+        let mid = (tokens[0].weight * 0.5) / total;
+        assert!(
+            (token_wipe_progress(mid, 0.0, tokens[0].weight, total) - 0.5).abs() < 1e-4,
+            "单字中点应为 0.5 平滑过渡值"
+        );
+        assert_eq!(token_wipe_progress(1.0, 0.0, tokens[0].weight, total), 1.0);
     }
 
     #[test]
     fn stagger_follows_actual_scroll_and_far_lines_release_later() {
-        assert_eq!(stagger_offset(0.1, 0.0, 3), 0.0);
-        assert!(stagger_offset(0.1, 50.0, 3) > stagger_offset(0.1, 50.0, 1));
-        assert_eq!(stagger_offset(0.5, 50.0, 6), 0.0);
+        assert_eq!(stagger_offset(0.0, 80.0, true, 3), 0.0);
+        assert_eq!(stagger_offset(0.1, 0.0, true, 3), 0.0);
+        assert!(stagger_offset(0.14, 80.0, true, 3) > stagger_offset(0.14, 80.0, true, 1));
+        assert_eq!(stagger_offset(0.85, 80.0, true, 6), 0.0);
     }
 
     #[test]

@@ -479,6 +479,7 @@ pub struct Root {
     pub(crate) lyrics_active: Option<usize>,
     /// 上一帧高亮的行：用于让「刚离开当前行」平滑缩小。
     pub(crate) lyrics_prev_active: Option<usize>,
+    pub(crate) lyrics_prev_growth: f32,
     /// 歌词缩放动画代次：每次换行换一个元素 id，动画才会重播。
     pub(crate) lyrics_anim_seq: u64,
     /// 最近一次换行的时刻：旧行保留「已唱完」样式做退场动画，超时后切回普通样式。
@@ -694,6 +695,7 @@ impl Root {
             lyrics_seq: 0,
             lyrics_active: None,
             lyrics_prev_active: None,
+            lyrics_prev_growth: 0.0,
             lyrics_anim_seq: 0,
             lyrics_switch_at: None,
             lyrics_scroll: gpui::ScrollHandle::new(),
@@ -1240,6 +1242,13 @@ impl Render for Root {
         if self.player_view_open {
             self.sync_lyrics_position(cx);
             self.tick_lyrics_center(window, cx);
+            if let Some((at, _)) = self.lyrics_scroll_stagger {
+                if std::time::Instant::now().duration_since(at).as_secs_f32() >= 0.85 {
+                    self.lyrics_scroll_stagger = None;
+                } else {
+                    window.request_animation_frame();
+                }
+            }
         }
         let playing = self.engine.snapshot().playing;
         let now = std::time::Instant::now();

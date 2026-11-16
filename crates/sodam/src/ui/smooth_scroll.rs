@@ -13,15 +13,15 @@ use gpui::{point, px, ScrollHandle};
 /// 这里略高于临界值，停下时不会来回晃。
 const STIFFNESS: f32 = 180.0;
 const DAMPING: f32 = 30.0;
-/// 歌词换行居中的软弹簧：比滚轮更慢、接近临界阻尼，滑行时间约 0.6s，
-/// 换行时是连续滑动而不是「啪」地弹到中间。
+/// 歌词换行居中的软弹簧：保留原有的柔和滑行阻尼曲线，
+/// 阻尼略大于 `2*sqrt(70) ≈ 16.73` 确保严格无过冲回弹。
 const LYRICS_STIFFNESS: f32 = 70.0;
-const LYRICS_DAMPING: f32 = 17.0;
+const LYRICS_DAMPING: f32 = 17.5;
 /// 速度上限，避免长按滚轮后瞬移。
 const MAX_SPEED: f32 = 6_000.0;
-/// 距离目标小于这个像素数、速度也足够小就贴合。
-const SNAP_DISTANCE: f32 = 0.35;
-const SNAP_SPEED: f32 = 6.0;
+/// 距离目标小于 0.85px 且速度足够小时直接落稳，消掉滚动末尾 1px 像素取整微抖。
+const SNAP_DISTANCE: f32 = 0.85;
+const SNAP_SPEED: f32 = 10.0;
 /// 滚轮一格给初速度的系数：手停下后还有一小段惯性。
 const WHEEL_IMPULSE: f32 = 12.0;
 
@@ -83,8 +83,7 @@ impl ScrollAnim {
             self.velocity = 0.0;
         }
         self.target = (self.target - delta).clamp(0.0, self.max);
-        // 给一个初速度，让滚轮停止后还有一小段惯性；不使用固定每帧插值，
-        // 否则高刷屏上会显得「一格一格」。
+        // 给一个适度初速度让起滚立刻跟手，同时过阻尼收尾不会越过目标回晃。
         self.velocity = (self.velocity - delta * WHEEL_IMPULSE).clamp(-MAX_SPEED, MAX_SPEED);
         if (self.target - self.current).abs() < SNAP_DISTANCE && self.velocity.abs() < SNAP_SPEED {
             self.current = self.target;
@@ -101,6 +100,15 @@ impl ScrollAnim {
     /// 连续跳行时只换目标，不重置速度，所以快速连跳也是连续的滑行。
     pub fn animate_to_soft(&mut self, applied: f32, target: f32, max: f32) {
         self.animate_to_with(applied, target, max, LYRICS_STIFFNESS, LYRICS_DAMPING);
+    }
+
+    /// 换行很快时仍沿新目标前进，避免上一段速度让列表先反向或冲过近处锚点。
+    pub fn animate_to_lyric(&mut self, applied: f32, target: f32, max: f32) {
+        let max = max.max(0.0);
+        let distance = target.clamp(0.0, max) - applied.clamp(0.0, max);
+        let limit = distance * LYRICS_STIFFNESS.sqrt();
+        self.velocity = self.velocity.clamp(limit.min(0.0), limit.max(0.0));
+        self.animate_to_soft(applied, target, max);
     }
 
     fn animate_to_with(
@@ -141,23 +149,32 @@ impl ScrollAnim {
         if !self.running {
             return None;
         }
-        let dt = self
+        let raw_dt = self
             .last_step
             .map(|last| now.saturating_duration_since(last).as_secs_f32())
-            .unwrap_or(1.0 / 60.0)
-            .clamp(1.0 / 240.0, 1.0 / 30.0);
+            .unwrap_or(1.0 / 60.0);
+        // 极短间隔重绘不伪造额外步长，防止高刷帧下速度步长抖动。
+        if raw_dt < 0.0002 {
+            return Some(self.current);
+        }
+        let total_dt = raw_dt.min(1.0 / 30.0);
         self.last_step = Some(now);
 
-        let displacement = self.target - self.current;
-        let acceleration = displacement * self.stiffness - self.velocity * self.damping;
-        self.velocity = (self.velocity + acceleration * dt).clamp(-MAX_SPEED, MAX_SPEED);
-        self.current = (self.current + self.velocity * dt).clamp(0.0, self.max);
+        // 细分成 <= 4ms 小步积分：保持原软弹簧物理手感，消除离散欧拉步长在终点前过冲微晃。
+        let steps = ((total_dt / 0.004).ceil() as usize).clamp(1, 9);
+        let dt = total_dt / steps as f32;
+        for _ in 0..steps {
+            let displacement = self.target - self.current;
+            let acceleration = displacement * self.stiffness - self.velocity * self.damping;
+            self.velocity = (self.velocity + acceleration * dt).clamp(-MAX_SPEED, MAX_SPEED);
+            self.current = (self.current + self.velocity * dt).clamp(0.0, self.max);
 
-        // 撞到边界就停住，不让弹簧继续积累速度。
-        if (self.current <= 0.0 && self.velocity < 0.0)
-            || (self.current >= self.max && self.velocity > 0.0)
-        {
-            self.velocity = 0.0;
+            // 撞到边界就停住，不让弹簧继续积累速度。
+            if (self.current <= 0.0 && self.velocity < 0.0)
+                || (self.current >= self.max && self.velocity > 0.0)
+            {
+                self.velocity = 0.0;
+            }
         }
 
         if (self.target - self.current).abs() <= SNAP_DISTANCE && self.velocity.abs() <= SNAP_SPEED
@@ -205,4 +222,79 @@ pub fn read(handle: &ScrollHandle) -> f32 {
 /// 读元素当前的最大滚动距离。
 pub fn max_of(handle: &ScrollHandle) -> f32 {
     f32::from(handle.max_offset().y).max(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn lyric_retarget_does_not_bounce_or_move_in_the_old_direction() {
+        for delta in [-6.0, 6.0] {
+            let mut anim = ScrollAnim::default();
+            anim.animate_to_lyric(0.0, 240.0, 400.0);
+            let started = anim.last_step.unwrap();
+            for frame in 1..=10 {
+                anim.step(started + Duration::from_millis(16 * frame));
+            }
+            let start = anim.current();
+            let target = start + delta;
+            anim.animate_to_lyric(start, target, 400.0);
+            let retargeted = anim.last_step.unwrap();
+            let mut last = start;
+            for frame in 1..=100 {
+                let Some(position) = anim.step(retargeted + Duration::from_millis(16 * frame))
+                else {
+                    break;
+                };
+                assert!((position - last) * delta >= 0.0);
+                assert!((target - position) * delta >= 0.0);
+                last = position;
+            }
+            assert_eq!(anim.current(), target);
+        }
+    }
+
+    #[test]
+    fn soft_spring_settles_smoothly_at_exact_target_without_bounce() {
+        let mut anim = ScrollAnim::default();
+        anim.animate_to_soft(0.0, 96.0, 400.0);
+        assert!(anim.is_running());
+        let mut t = anim.last_step.unwrap();
+        let mut prev = anim.current();
+        for _ in 0..80 {
+            t += Duration::from_millis(16);
+            if let Some(pos) = anim.step(t) {
+                assert!(pos >= prev - 1e-3, "软弹簧不应来回过冲晃动");
+                assert!(pos <= 96.0 + 1e-3, "不应越过目标");
+                prev = pos;
+            } else {
+                break;
+            }
+        }
+        assert!(!anim.is_running());
+        assert_eq!(anim.current(), 96.0);
+    }
+
+    #[test]
+    fn wheel_spring_settles_without_overshooting_target() {
+        let mut anim = ScrollAnim::default();
+        anim.wheel(0.0, -100.0, 500.0);
+        assert!(anim.is_running());
+        let mut t = anim.last_step.unwrap();
+        let mut prev = anim.current();
+        for _ in 0..80 {
+            t += Duration::from_millis(16);
+            if let Some(pos) = anim.step(t) {
+                assert!(pos >= prev - 1e-3, "过阻尼滚轮不应回晃倒退");
+                assert!(pos <= 100.0 + 1e-3, "不应越过目标后再反弹");
+                prev = pos;
+            } else {
+                break;
+            }
+        }
+        assert!(!anim.is_running());
+        assert_eq!(anim.current(), 100.0);
+    }
 }

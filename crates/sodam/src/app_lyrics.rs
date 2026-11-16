@@ -9,6 +9,7 @@ use std::sync::Arc;
 use gpui::{AppContext, Context};
 
 use crate::app::Root;
+use crate::ui::motion;
 use sodam_core::lyrics::Lyrics;
 use sodam_core::models::TrackItem;
 
@@ -64,6 +65,9 @@ impl Root {
         if active == self.lyrics_active {
             return;
         }
+        self.lyrics_prev_growth = self.lyrics_switch_at.map_or(1.0, |at| {
+            gpui::ease_out_quint()(motion::progress(at, motion::duration::LYRIC))
+        });
         self.lyrics_prev_active = self.lyrics_active;
         self.lyrics_active = active;
         self.lyrics_anim_seq = self.lyrics_anim_seq.wrapping_add(1);
