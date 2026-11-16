@@ -10,6 +10,7 @@ pub mod log_outlet;
 pub mod loudness;
 pub mod lyrics;
 pub mod models;
+mod pinyin;
 pub mod preferences;
 pub mod queue;
 pub mod session;

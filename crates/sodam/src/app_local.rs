@@ -327,9 +327,14 @@ impl Root {
         }
         let tracks: Vec<TrackItem> = entry.tracks.iter().map(|track| track.to_item()).collect();
         self.local_selected = playlist;
+        let start = if self.queue.mode == sodam_core::queue::PlayMode::Shuffle {
+            sodam_core::queue::random_index(tracks.len())
+        } else {
+            0
+        };
         // 入队 + 起播统一交给 play_from：本地曲目在 start_track 里按 id 前缀分叉，
         // 直接 engine.load，不经过下载/预取管线。
-        self.play_from(tracks, 0, cx);
+        self.play_from(tracks, start, cx);
     }
 
     /// 播放歌单里的某一首：整个歌单入队，从这一首开始。

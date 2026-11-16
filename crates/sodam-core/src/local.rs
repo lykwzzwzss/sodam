@@ -157,7 +157,7 @@ pub fn scan(root: &Path) -> LocalLibrary {
     }
 
     sort_tracks(&mut root_tracks);
-    folders.sort_by_cached_key(|folder| (folder.0.to_lowercase(), folder.0.clone()));
+    folders.sort_by_cached_key(|folder| (crate::pinyin::sort_key(&folder.0), folder.0.clone()));
 
     // 「全部歌单」= 根目录直接文件在前，其后各子文件夹按名字顺序，是拼接而不是全局重排：
     // 用户找歌时记住的是「它在哪个文件夹里」，全局按曲名重排会把这份记忆打散。
@@ -246,9 +246,9 @@ fn is_audio_path(path: &Path) -> bool {
         })
 }
 
-/// 按曲名小写排序；撞名时按路径兜底，保证同一目录每次扫出来的顺序完全相同。
+/// 按「数字/特殊字符最前 + 汉字拼音首字母 A–Z」排序；撞名时按路径兜底，保证顺序稳定。
 fn sort_tracks(tracks: &mut [LocalTrack]) {
-    tracks.sort_by_cached_key(|track| (track.title.to_lowercase(), track.path.clone()));
+    tracks.sort_by_cached_key(|track| (crate::pinyin::sort_key(&track.title), track.path.clone()));
 }
 
 /// 读一首歌的标签与时长；任何一步失败都退化成「文件名 + 未知歌手 + 时长 0」。
@@ -444,6 +444,42 @@ mod tests {
             .collect();
         assert_eq!(titles, vec!["alpha", "Bravo", "Charlie"], "按小写曲名排序");
         assert_eq!(library.playlists[0].tracks.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tracks_and_folders_sort_by_pinyin_initial_with_digits_and_symbols_first() {
+        let root = temp_root();
+        touch(&root.join("周杰伦.mp3"));
+        touch(&root.join("爱你.mp3"));
+        touch(&root.join("Bad Guy.mp3"));
+        touch(&root.join("123.mp3"));
+        touch(&root.join("《晴天》.mp3"));
+        touch(&root.join("[Intro].mp3"));
+
+        let folder_z = root.join("周杰伦歌单");
+        let folder_num = root.join("01精选");
+        let folder_a = root.join("爱的歌单");
+        std::fs::create_dir_all(&folder_z).unwrap();
+        std::fs::create_dir_all(&folder_num).unwrap();
+        std::fs::create_dir_all(&folder_a).unwrap();
+
+        let library = scan(&root);
+        let root_titles: Vec<&str> = library.playlists[0]
+            .tracks
+            .iter()
+            .map(|track| track.title.as_str())
+            .collect();
+        assert_eq!(
+            root_titles,
+            vec!["123", "[Intro]", "《晴天》", "爱你", "Bad Guy", "周杰伦"]
+        );
+        let folder_names: Vec<&str> = library.playlists[1..]
+            .iter()
+            .map(|playlist| playlist.name.as_str())
+            .collect();
+        assert_eq!(folder_names, vec!["01精选", "爱的歌单", "周杰伦歌单"]);
 
         let _ = std::fs::remove_dir_all(&root);
     }

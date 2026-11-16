@@ -109,6 +109,18 @@ fn shuffled_indices(mut round: Vec<usize>) -> Vec<usize> {
     round
 }
 
+/// 在 `0..len` 中随机取一个起始下标（`len <= 1` 时返回 `0`）。
+pub fn random_index(len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_nanos() as u64)
+        .unwrap_or(0x9E3779B97F4A7C15);
+    (mix_seed(seed) % len as u64) as usize
+}
+
 impl Queue {
     pub fn new(tracks: Vec<TrackItem>) -> Self {
         Self {
